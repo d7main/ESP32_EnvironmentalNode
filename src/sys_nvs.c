@@ -1,0 +1,134 @@
+/**
+ * @file sys_nvs.c
+ * @brief Non-Volatile Storage (NVS) abstraction layer for configuration persistence
+ * @author d7main
+ * @license MIT
+ */
+
+#include "sys_nvs.h"
+#include "config.h"
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "esp_log.h"
+#include <string.h>
+
+static const char *TAG = "SYS_NVS";
+
+/**
+ * @brief Initializes the default NVS partition.
+ *        If the partition is truncated or has a new version, it will be erased and reinitialized.
+ * 
+ * @return true on success, false otherwise
+ */
+bool sys_nvs_init(void) {
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition truncated or upgraded. Erasing and retrying...");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    return (err == ESP_OK);
+}
+
+/**
+ * @brief Loads the system configuration from NVS.
+ *        If a key is missing, it falls back to a safe default (empty string or 0)
+ *        to prevent reading garbage memory.
+ * 
+ * @param out_cfg Pointer to the configuration structure to populate
+ * @return true if NVS handle opened successfully, false otherwise
+ */
+bool sys_nvs_load_config(sys_config_t *out_cfg) {
+    // Zero out the structure to prevent any random RAM garbage
+    memset(out_cfg, 0, sizeof(sys_config_t));
+
+    nvs_handle_t handle;
+    // Open in READWRITE mode. If the namespace doesn't exist yet, 
+    // it will be created automatically instead of failing instantly.
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to open NVS namespace (%s). Brand new chip?", esp_err_to_name(err));
+        out_cfg->is_configured = false;
+        return false;
+    }
+
+    size_t len;
+
+    // Load strings safely. If the key is missing, write a null-terminator.
+    len = SYS_WIFI_SSID_MAX_LEN;
+    if (nvs_get_str(handle, "ssid", out_cfg->wifi_ssid, &len) != ESP_OK) {
+        out_cfg->wifi_ssid[0] = '\0';
+    }
+
+    len = SYS_WIFI_PASS_MAX_LEN;
+    if (nvs_get_str(handle, "pass", out_cfg->wifi_pass, &len) != ESP_OK) {
+        out_cfg->wifi_pass[0] = '\0';
+    }
+
+    len = SYS_TG_TOKEN_MAX_LEN;
+    if (nvs_get_str(handle, "tg_tok", out_cfg->tg_token, &len) != ESP_OK) {
+        out_cfg->tg_token[0] = '\0';
+    }
+
+    len = SYS_TG_CHAT_MAX_LEN;
+    if (nvs_get_str(handle, "tg_chat", out_cfg->tg_chat_id, &len) != ESP_OK) {
+        out_cfg->tg_chat_id[0] = '\0';
+    }
+
+    // Load integer values safely. If missing, default to 0.
+    if (nvs_get_i16(handle, "v_dry", &out_cfg->v_dry_mv) != ESP_OK) {
+        out_cfg->v_dry_mv = 0;
+    }
+
+    if (nvs_get_i16(handle, "v_wet", &out_cfg->v_wet_mv) != ESP_OK) {
+        out_cfg->v_wet_mv = 0;
+    }
+
+    // Load the configuration status flag
+    uint8_t conf = 0;
+    if (nvs_get_u8(handle, "conf", &conf) != ESP_OK) {
+        conf = 0;
+    }
+    out_cfg->is_configured = (conf == 1);
+
+    ESP_LOGI(TAG, "Configuration loaded. is_configured = %d", out_cfg->is_configured);
+
+    nvs_close(handle);
+    return true;
+}
+
+/**
+ * @brief Saves the given configuration structure back to NVS.
+ * 
+ * @param cfg Pointer to the configuration to save
+ * @return true on successful write and commit, false otherwise
+ */
+bool sys_nvs_save_config(const sys_config_t *cfg) {
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS namespace for writing!");
+        return false;
+    }
+
+    // Write all parameters to NVS
+    nvs_set_str(handle, "ssid", cfg->wifi_ssid);
+    nvs_set_str(handle, "pass", cfg->wifi_pass);
+    nvs_set_str(handle, "tg_tok", cfg->tg_token);
+    nvs_set_str(handle, "tg_chat", cfg->tg_chat_id);
+    
+    nvs_set_i16(handle, "v_dry", cfg->v_dry_mv);
+    nvs_set_i16(handle, "v_wet", cfg->v_wet_mv);
+    nvs_set_u8(handle, "conf", cfg->is_configured ? 1 : 0);
+
+    // Commit changes to flash memory
+    esp_err_t err = nvs_commit(handle);
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Configuration saved and committed to flash.");
+        return true;
+    } else {
+        ESP_LOGE(TAG, "Failed to commit configuration to NVS! Error: %s", esp_err_to_name(err));
+        return false;
+    }
+}
