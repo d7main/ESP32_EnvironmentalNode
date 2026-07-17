@@ -66,7 +66,12 @@
 /* 
  * SYSTEM CONTROLS
  * */
-#define BUTTON_CONFIG_PIN           GPIO_NUM_2        /* BOOT Button for Web Portal */
+/* NOTE: GPIO2 is a strapping pin on ESP32-C3 (selects JTAG vs. normal boot).
+ * Shorting GPIO2 to GND during power-on holds the chip in JTAG/download mode
+ * and prevents app_main from ever running. Use GPIO9 instead — it is the
+ * physical BOOT button on the ESP32-C3-DevKitM-1 board and is safe to pull
+ * LOW at any time (internal pull-up is always enabled in hardware). */
+#define BUTTON_CONFIG_PIN           GPIO_NUM_9        /* BOOT Button for Web Portal */
 
 #define DEFAULT_SLEEP_SEC           1800          /* 30 minutes */
 #define NVS_NAMESPACE               "storage"
