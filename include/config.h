@@ -49,7 +49,10 @@
     #define CHIP_NAME               "ESP32-C3"
     
     /* Soil Moisture (Capacitive via ADC) */
-    #define SENSOR_POWER_PIN        GPIO_NUM_21
+    /* GPIO21 = USB D+ on ESP32-C3-DevKitM-1 — NOT a usable general-purpose pin.
+     * Set this to the GPIO that actually controls your sensor's VCC transistor.
+     * GPIO7 is a safe default on DevKitM-1; update to match your real wiring. */
+    #define SENSOR_POWER_PIN        GPIO_NUM_7
     #define SENSOR_ADC_CHANNEL      ADC_CHANNEL_2 /* GPIO3 */
     
     /* BMP280 (I2C) */

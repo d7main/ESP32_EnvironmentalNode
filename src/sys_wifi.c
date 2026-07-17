@@ -27,6 +27,8 @@
 #include "esp_http_client.h"
 #include "cJSON.h"
 
+#include "freertos/semphr.h"
+
 static const char *TAG = "SYS_WIFI";
 static EventGroupHandle_t wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
@@ -63,7 +65,15 @@ typedef struct {
 } portal_sensor_cache_t;
 
 static portal_sensor_cache_t s_cache = { .valid = false };
-static portMUX_TYPE           s_cache_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* BUG FIX #3: replaced portMUX_TYPE spinlock with a proper FreeRTOS mutex.
+ * The spinlock (portENTER_CRITICAL) disables the entire scheduler for its
+ * duration.  When hal_dht22_read() runs its own portENTER_CRITICAL section
+ * (~5 ms of blocked interrupts) inside the sensor task, and the HTTPD task
+ * simultaneously tries to read the cache, the combined critical section time
+ * exceeds the Task Watchdog Timer threshold and causes a watchdog reset.
+ * A mutex lets the HTTPD task block (yield CPU) instead of spin-waiting. */
+static SemaphoreHandle_t s_cache_mutex = NULL;
 
 /**
  * @brief FreeRTOS task: poll all sensors every PORTAL_SENSOR_POLL_MS ms.
@@ -73,6 +83,16 @@ static portMUX_TYPE           s_cache_mux = portMUX_INITIALIZER_UNLOCKED;
 static void portal_sensor_task(void *arg) {
     ESP_LOGI(TAG, "[SENSOR_TASK] Portal sensor polling started "
                   "(period = %u ms).", PORTAL_SENSOR_POLL_MS);
+
+    /* Create the cache mutex on first run (task is only ever created once). */
+    if (s_cache_mutex == NULL) {
+        s_cache_mutex = xSemaphoreCreateMutex();
+        if (s_cache_mutex == NULL) {
+            ESP_LOGE(TAG, "[SENSOR_TASK] Failed to create cache mutex! Aborting task.");
+            vTaskDelete(NULL);
+            return;
+        }
+    }
 
     for (;;) {
         /* -- Soil moisture (HAL handles SENSOR_POWER_PIN gate internally) -- */
@@ -86,18 +106,21 @@ static void portal_sensor_task(void *arg) {
         dht22_data_t dht = {0};
         hal_dht22_read(&dht);
 
-        /* -- Commit to cache under spinlock (ISR-safe, no mutex overhead) -- */
-        portENTER_CRITICAL(&s_cache_mux);
-        s_cache.soil_mv = soil_mv;
-        s_cache.bmp_t   = bmp.temperature;
-        s_cache.bmp_p   = bmp.pressure;
-        s_cache.dht_t   = dht.temperature;
-        s_cache.dht_h   = dht.humidity;
-        s_cache.valid   = true;
-        portEXIT_CRITICAL(&s_cache_mux);
+        /* -- Commit to cache under mutex (not spinlock — see BUG FIX #3) -- */
+        if (xSemaphoreTake(s_cache_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            s_cache.soil_mv = soil_mv;
+            s_cache.bmp_t   = bmp.temperature;
+            s_cache.bmp_p   = bmp.pressure;
+            s_cache.dht_t   = dht.temperature;
+            s_cache.dht_h   = dht.humidity;
+            s_cache.valid   = true;
+            xSemaphoreGive(s_cache_mutex);
+        } else {
+            ESP_LOGW(TAG, "[SENSOR_TASK] Could not acquire cache mutex — skipping update.");
+        }
 
         ESP_LOGI(TAG, "[SENSOR_TASK] Cache updated — soil: %ld mV | "
-                      "BMP: %.1f °C / %.1f hPa | DHT: %.1f °C / %.1f %%",
+                      "BMP: %.1f \xc2\xb0C / %.1f hPa | DHT: %.1f \xc2\xb0C / %.1f %%",
                  (long)soil_mv, bmp.temperature, bmp.pressure,
                  dht.temperature, dht.humidity);
 
@@ -286,11 +309,16 @@ static esp_err_t http_get_index_handler(httpd_req_t *req) {
  *        }
  */
 static esp_err_t http_get_status_handler(httpd_req_t *req) {
-    /* Snapshot the cache under spinlock — the handler runs in its own task. */
-    portal_sensor_cache_t snap;
-    portENTER_CRITICAL(&s_cache_mux);
-    snap = s_cache;
-    portEXIT_CRITICAL(&s_cache_mux);
+    /* Snapshot the cache under mutex — the handler runs in the HTTPD task. */
+    portal_sensor_cache_t snap = { .valid = false };
+
+    if (s_cache_mutex != NULL &&
+        xSemaphoreTake(s_cache_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        snap = s_cache;
+        xSemaphoreGive(s_cache_mutex);
+    } else {
+        ESP_LOGW(TAG, "/api/status: could not acquire cache mutex, returning stale data.");
+    }
 
     char json_buf[160];
     snprintf(json_buf, sizeof(json_buf),
@@ -305,6 +333,21 @@ static esp_err_t http_get_status_handler(httpd_req_t *req) {
     /* Prevent browser caching — we always want fresh data. */
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, json_buf, HTTPD_RESP_USE_STRLEN);
+}
+
+/* BUG FIX #2 helpers: cJSON_GetObjectItem() returns NULL when a key is
+ * missing, has the wrong type, or the browser sends NaN (from parseInt on
+ * an empty field, serialised as null by JSON.stringify).  The original code
+ * dereferenced the NULL pointer directly, causing an immediate panic and a
+ * partial NVS write that corrupted the config and created a boot loop. */
+static const char *safe_str(const cJSON *item) {
+    if (!item || !cJSON_IsString(item) || !item->valuestring) return "";
+    return item->valuestring;
+}
+
+static int safe_int(const cJSON *item, int fallback) {
+    if (!item || !cJSON_IsNumber(item)) return fallback;
+    return item->valueint;
 }
 
 static esp_err_t http_post_save_handler(httpd_req_t *req) {
@@ -328,14 +371,23 @@ static esp_err_t http_post_save_handler(httpd_req_t *req) {
 
     sys_config_t cfg;
     memset(&cfg, 0, sizeof(sys_config_t));
-    
-    strncpy(cfg.wifi_ssid, cJSON_GetObjectItem(root, "ssid")->valuestring, SYS_WIFI_SSID_MAX_LEN - 1);
-    strncpy(cfg.wifi_pass, cJSON_GetObjectItem(root, "pass")->valuestring, SYS_WIFI_PASS_MAX_LEN - 1);
-    strncpy(cfg.tg_token, cJSON_GetObjectItem(root, "tg_tok")->valuestring, SYS_TG_TOKEN_MAX_LEN - 1);
-    strncpy(cfg.tg_chat_id, cJSON_GetObjectItem(root, "tg_chat")->valuestring, SYS_TG_CHAT_MAX_LEN - 1);
-    cfg.v_dry_mv = (int16_t)cJSON_GetObjectItem(root, "v_dry")->valueint;
-    cfg.v_wet_mv = (int16_t)cJSON_GetObjectItem(root, "v_wet")->valueint;
+
+    /* Use safe accessors — no raw pointer dereference on potentially-NULL items. */
+    strncpy(cfg.wifi_ssid,  safe_str(cJSON_GetObjectItem(root, "ssid")),    SYS_WIFI_SSID_MAX_LEN - 1);
+    strncpy(cfg.wifi_pass,  safe_str(cJSON_GetObjectItem(root, "pass")),    SYS_WIFI_PASS_MAX_LEN - 1);
+    strncpy(cfg.tg_token,   safe_str(cJSON_GetObjectItem(root, "tg_tok")),  SYS_TG_TOKEN_MAX_LEN  - 1);
+    strncpy(cfg.tg_chat_id, safe_str(cJSON_GetObjectItem(root, "tg_chat")), SYS_TG_CHAT_MAX_LEN   - 1);
+    cfg.v_dry_mv = (int16_t)safe_int(cJSON_GetObjectItem(root, "v_dry"), 0);
+    cfg.v_wet_mv = (int16_t)safe_int(cJSON_GetObjectItem(root, "v_wet"), 0);
     cfg.is_configured = true;
+
+    /* Require at minimum a non-empty SSID; reject the save if it is blank. */
+    if (cfg.wifi_ssid[0] == '\0') {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID cannot be empty");
+        ESP_LOGE(TAG, "Save rejected: SSID field is empty.");
+        return ESP_FAIL;
+    }
 
     sys_nvs_save_config(&cfg);
     cJSON_Delete(root);
@@ -345,7 +397,7 @@ static esp_err_t http_post_save_handler(httpd_req_t *req) {
     ESP_LOGW(TAG, "Configuration saved. Rebooting in 2 seconds...");
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
-    
+
     return ESP_OK;
 }
 

@@ -27,7 +27,12 @@ static void pwr_gate_enable(void) {
     };
     gpio_config(&io_conf);
     gpio_set_level(SENSOR_POWER_PIN, 1);
-    vTaskDelay(pdMS_TO_TICKS(5)); 
+
+    /* BUG FIX #1 — was 5 ms; too short for the capacitive sensor's oscillator
+     * to stabilise.  At 5 ms the ADC sampled the rising supply rail and always
+     * returned ~3300 mV.  HAL_MOISTURE_DELAY_MS is defined as 50 ms in the
+     * header; using 2× (100 ms) gives comfortable margin for all sensor variants. */
+    vTaskDelay(pdMS_TO_TICKS(HAL_MOISTURE_DELAY_MS * 2));
 }
 
 static void pwr_gate_disable(void) {
