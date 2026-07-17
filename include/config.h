@@ -53,7 +53,7 @@
      * Set this to the GPIO that actually controls your sensor's VCC transistor.
      * GPIO7 is a safe default on DevKitM-1; update to match your real wiring. */
     #define SENSOR_POWER_PIN        GPIO_NUM_7
-    #define SENSOR_ADC_CHANNEL      ADC_CHANNEL_2 /* GPIO3 */
+    #define SENSOR_ADC_CHANNEL      ADC_CHANNEL_1 /* GPIO2 */
     
     /* BMP280 (I2C) */
     #define I2C_SDA_PIN             GPIO_NUM_8

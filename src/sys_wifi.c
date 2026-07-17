@@ -27,7 +27,6 @@
 #include "esp_http_client.h"
 #include "cJSON.h"
 
-#include "freertos/semphr.h"
 
 static const char *TAG = "SYS_WIFI";
 static EventGroupHandle_t wifi_event_group;
@@ -35,15 +34,24 @@ static EventGroupHandle_t wifi_event_group;
 #define WIFI_FAIL_BIT      BIT1
 
 /* ==========================================================================
- * PORTAL-MODE SENSOR CACHE
+ * PORTAL-MODE SENSOR GLOBALS
  *
- * These globals are written exclusively by the portal_sensor_task (every 20 s)
- * and read by the /api/status HTTP handler.  Access is protected by a spinlock
- * so a partial read can never observe a torn write.
+ * Written exclusively by portal_sensor_task() (every 20 s) and read by the
+ * /api/status HTTP handler.  No lock is required or correct:
  *
- * The task is created ONLY inside sys_wifi_start_ap_and_server() and therefore
- * only exists during Config Mode.  It is never spawned in the normal
- * measure → deep-sleep path.
+ *  - On the ESP32-C3 (single-core RISC-V) all aligned 32-bit loads and
+ *    stores are single instructions — they cannot be preempted mid-write.
+ *    float and int32_t are both exactly 32 bits and naturally 4-byte aligned
+ *    by the compiler, so reads and writes are already atomic.
+ *
+ *  - volatile tells the compiler it must re-fetch the value from memory on
+ *    every access instead of keeping a stale copy in a register.
+ *
+ *  - Using a mutex here would cause the HTTP handler to BLOCK while the
+ *    sensor task holds the lock during a 100 ms ADC conversion or a 5 ms
+ *    DHT22 readout, starving the web server.  Using a spinlock
+ *    (portENTER_CRITICAL) would freeze the entire scheduler for the same
+ *    duration.  Either choice causes the exact deadlock/watchdog symptom.
  * ========================================================================== */
 
 /** Polling period for the portal sensor task (ms). */
@@ -55,44 +63,21 @@ static EventGroupHandle_t wifi_event_group;
 /** Priority — above idle, below everything else. */
 #define PORTAL_SENSOR_PRIORITY  2U
 
-typedef struct {
-    int32_t  soil_mv;      /* Raw ADC reading in millivolts */
-    float    bmp_t;        /* BMP280 temperature (°C)       */
-    float    bmp_p;        /* BMP280 pressure (hPa)         */
-    float    dht_t;        /* DHT22 temperature (°C)        */
-    float    dht_h;        /* DHT22 humidity (%)            */
-    bool     valid;        /* true once a reading exists    */
-} portal_sensor_cache_t;
-
-static portal_sensor_cache_t s_cache = { .valid = false };
-
-/* BUG FIX #3: replaced portMUX_TYPE spinlock with a proper FreeRTOS mutex.
- * The spinlock (portENTER_CRITICAL) disables the entire scheduler for its
- * duration.  When hal_dht22_read() runs its own portENTER_CRITICAL section
- * (~5 ms of blocked interrupts) inside the sensor task, and the HTTPD task
- * simultaneously tries to read the cache, the combined critical section time
- * exceeds the Task Watchdog Timer threshold and causes a watchdog reset.
- * A mutex lets the HTTPD task block (yield CPU) instead of spin-waiting. */
-static SemaphoreHandle_t s_cache_mutex = NULL;
+static volatile int32_t s_moisture_mv = -1;  /* -1 = not yet sampled        */
+static volatile float   s_bmp_temp    = 0.0f;
+static volatile float   s_bmp_press   = 0.0f;
+static volatile float   s_dht_temp    = 0.0f;
+static volatile float   s_dht_hum     = 0.0f;
+static volatile bool    s_data_valid  = false;
 
 /**
  * @brief FreeRTOS task: poll all sensors every PORTAL_SENSOR_POLL_MS ms.
  *        Exists ONLY during Config Mode (AP + Web Server).
- *        hal_moisture_read_mv() powers the sensor on/off internally.
+ *        No locks are used — see comment block above.
  */
 static void portal_sensor_task(void *arg) {
     ESP_LOGI(TAG, "[SENSOR_TASK] Portal sensor polling started "
                   "(period = %u ms).", PORTAL_SENSOR_POLL_MS);
-
-    /* Create the cache mutex on first run (task is only ever created once). */
-    if (s_cache_mutex == NULL) {
-        s_cache_mutex = xSemaphoreCreateMutex();
-        if (s_cache_mutex == NULL) {
-            ESP_LOGE(TAG, "[SENSOR_TASK] Failed to create cache mutex! Aborting task.");
-            vTaskDelete(NULL);
-            return;
-        }
-    }
 
     for (;;) {
         /* -- Soil moisture (HAL handles SENSOR_POWER_PIN gate internally) -- */
@@ -106,24 +91,21 @@ static void portal_sensor_task(void *arg) {
         dht22_data_t dht = {0};
         hal_dht22_read(&dht);
 
-        /* -- Commit to cache under mutex (not spinlock — see BUG FIX #3) -- */
-        if (xSemaphoreTake(s_cache_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            s_cache.soil_mv = soil_mv;
-            s_cache.bmp_t   = bmp.temperature;
-            s_cache.bmp_p   = bmp.pressure;
-            s_cache.dht_t   = dht.temperature;
-            s_cache.dht_h   = dht.humidity;
-            s_cache.valid   = true;
-            xSemaphoreGive(s_cache_mutex);
-        } else {
-            ESP_LOGW(TAG, "[SENSOR_TASK] Could not acquire cache mutex — skipping update.");
-        }
+        /* -- Publish results; 32-bit aligned writes are atomic on RISC-V -- */
+        s_moisture_mv = soil_mv;
+        s_bmp_temp    = bmp.temperature;
+        s_bmp_press   = bmp.pressure;
+        s_dht_temp    = dht.temperature;
+        s_dht_hum     = dht.humidity;
+        s_data_valid  = true;
 
-        ESP_LOGI(TAG, "[SENSOR_TASK] Cache updated — soil: %ld mV | "
-                      "BMP: %.1f \xc2\xb0C / %.1f hPa | DHT: %.1f \xc2\xb0C / %.1f %%",
-                 (long)soil_mv, bmp.temperature, bmp.pressure,
+        ESP_LOGI(TAG, "[SENSOR_TASK] soil: %ld mV | "
+                      "BMP: %.1f C / %.1f hPa | DHT: %.1f C / %.1f %%",
+                 (long)soil_mv,
+                 bmp.temperature, bmp.pressure,
                  dht.temperature, dht.humidity);
 
+        /* Yield the CPU for the full poll period. */
         vTaskDelay(pdMS_TO_TICKS(PORTAL_SENSOR_POLL_MS));
     }
 }
@@ -292,45 +274,33 @@ static esp_err_t http_get_index_handler(httpd_req_t *req) {
 /**
  * @brief GET /api/status
  *
- *        Returns the latest sensor readings from the portal sensor cache.
- *        The cache is populated every PORTAL_SENSOR_POLL_MS ms by
- *        portal_sensor_task().  If no reading exists yet (first boot,
- *        task hasn't fired), all numeric values will be 0 and "valid"
- *        will be false.
+ *        Returns the latest sensor readings from the volatile globals.
+ *        The globals are updated every PORTAL_SENSOR_POLL_MS ms by
+ *        portal_sensor_task().  No lock is taken — 32-bit reads are atomic
+ *        on the single-core ESP32-C3 RISC-V core.
  *
  *        JSON format:
  *        {
- *          "soil_mv": <int>,     raw ADC in millivolts
- *          "bmp_t":   <float>,   BMP280 temperature °C
+ *          "soil_mv": <int>,     raw ADC in millivolts (-1 = not yet sampled)
+ *          "bmp_t":   <float>,   BMP280 temperature degC
  *          "bmp_p":   <float>,   BMP280 pressure hPa
- *          "dht_t":   <float>,   DHT22 temperature °C
+ *          "dht_t":   <float>,   DHT22 temperature degC
  *          "dht_h":   <float>,   DHT22 humidity %
  *          "valid":   <bool>     false until first poll completes
  *        }
  */
 static esp_err_t http_get_status_handler(httpd_req_t *req) {
-    /* Snapshot the cache under mutex — the handler runs in the HTTPD task. */
-    portal_sensor_cache_t snap = { .valid = false };
-
-    if (s_cache_mutex != NULL &&
-        xSemaphoreTake(s_cache_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-        snap = s_cache;
-        xSemaphoreGive(s_cache_mutex);
-    } else {
-        ESP_LOGW(TAG, "/api/status: could not acquire cache mutex, returning stale data.");
-    }
-
+    /* Read volatile globals directly — lock-free, no blocking. */
     char json_buf[160];
     snprintf(json_buf, sizeof(json_buf),
              "{\"soil_mv\":%ld,\"bmp_t\":%.1f,\"bmp_p\":%.1f"
              ",\"dht_t\":%.1f,\"dht_h\":%.1f,\"valid\":%s}",
-             (long)snap.soil_mv,
-             snap.bmp_t, snap.bmp_p,
-             snap.dht_t, snap.dht_h,
-             snap.valid ? "true" : "false");
+             (long)s_moisture_mv,
+             (float)s_bmp_temp, (float)s_bmp_press,
+             (float)s_dht_temp, (float)s_dht_hum,
+             s_data_valid ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
-    /* Prevent browser caching — we always want fresh data. */
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, json_buf, HTTPD_RESP_USE_STRLEN);
 }
