@@ -16,6 +16,7 @@
 #include "hal_dht22.h"
 
 #include <string.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -30,6 +31,79 @@ static const char *TAG = "SYS_WIFI";
 static EventGroupHandle_t wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
+
+/* ==========================================================================
+ * PORTAL-MODE SENSOR CACHE
+ *
+ * These globals are written exclusively by the portal_sensor_task (every 20 s)
+ * and read by the /api/status HTTP handler.  Access is protected by a spinlock
+ * so a partial read can never observe a torn write.
+ *
+ * The task is created ONLY inside sys_wifi_start_ap_and_server() and therefore
+ * only exists during Config Mode.  It is never spawned in the normal
+ * measure → deep-sleep path.
+ * ========================================================================== */
+
+/** Polling period for the portal sensor task (ms). */
+#define PORTAL_SENSOR_POLL_MS   20000U
+
+/** Stack for the portal sensor task (words). */
+#define PORTAL_SENSOR_STACK     3072U
+
+/** Priority — above idle, below everything else. */
+#define PORTAL_SENSOR_PRIORITY  2U
+
+typedef struct {
+    int32_t  soil_mv;      /* Raw ADC reading in millivolts */
+    float    bmp_t;        /* BMP280 temperature (°C)       */
+    float    bmp_p;        /* BMP280 pressure (hPa)         */
+    float    dht_t;        /* DHT22 temperature (°C)        */
+    float    dht_h;        /* DHT22 humidity (%)            */
+    bool     valid;        /* true once a reading exists    */
+} portal_sensor_cache_t;
+
+static portal_sensor_cache_t s_cache = { .valid = false };
+static portMUX_TYPE           s_cache_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/**
+ * @brief FreeRTOS task: poll all sensors every PORTAL_SENSOR_POLL_MS ms.
+ *        Exists ONLY during Config Mode (AP + Web Server).
+ *        hal_moisture_read_mv() powers the sensor on/off internally.
+ */
+static void portal_sensor_task(void *arg) {
+    ESP_LOGI(TAG, "[SENSOR_TASK] Portal sensor polling started "
+                  "(period = %u ms).", PORTAL_SENSOR_POLL_MS);
+
+    for (;;) {
+        /* -- Soil moisture (HAL handles SENSOR_POWER_PIN gate internally) -- */
+        int32_t soil_mv = hal_moisture_read_mv();
+
+        /* -- BMP280 -- */
+        bmp280_data_t bmp = {0};
+        hal_bmp280_read(&bmp);
+
+        /* -- DHT22 -- */
+        dht22_data_t dht = {0};
+        hal_dht22_read(&dht);
+
+        /* -- Commit to cache under spinlock (ISR-safe, no mutex overhead) -- */
+        portENTER_CRITICAL(&s_cache_mux);
+        s_cache.soil_mv = soil_mv;
+        s_cache.bmp_t   = bmp.temperature;
+        s_cache.bmp_p   = bmp.pressure;
+        s_cache.dht_t   = dht.temperature;
+        s_cache.dht_h   = dht.humidity;
+        s_cache.valid   = true;
+        portEXIT_CRITICAL(&s_cache_mux);
+
+        ESP_LOGI(TAG, "[SENSOR_TASK] Cache updated — soil: %ld mV | "
+                      "BMP: %.1f °C / %.1f hPa | DHT: %.1f °C / %.1f %%",
+                 (long)soil_mv, bmp.temperature, bmp.pressure,
+                 dht.temperature, dht.humidity);
+
+        vTaskDelay(pdMS_TO_TICKS(PORTAL_SENSOR_POLL_MS));
+    }
+}
 
 /* ==========================================================================
  * EMBEDDED HTML PORTAL (Clean White & Orange UI)
@@ -54,6 +128,11 @@ static const char *html_page =
 ".metric:hover{transform:scale(1.02);}"
 ".m-title{font-size:0.95rem;color:var(--muted);font-weight:600;}"
 ".m-val{font-size:1.2rem;font-weight:800;color:var(--primary);}"
+/* Progress bar for soil moisture percentage */
+".pct-wrap{margin-top:8px;background:#f0f0f0;border-radius:6px;height:8px;overflow:hidden;}"
+".pct-bar{height:100%;background:var(--primary);border-radius:6px;transition:width 0.6s ease;}"
+/* Inline hint shown next to calibration inputs */
+".live-hint{display:inline-block;margin-left:10px;font-size:0.82rem;font-weight:700;color:var(--primary);}"
 ".input-group{margin-bottom:18px;}"
 "label{display:block;font-size:0.85rem;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;}"
 "input{width:100%;padding:14px;border:2px solid #e1e4e8;border-radius:10px;font-size:1rem;box-sizing:border-box;transition:all 0.3s;background:#fefefe;font-family:monospace;}"
@@ -68,41 +147,87 @@ static const char *html_page =
 ".footer a:hover{color:#cc5200;}"
 "</style>"
 "<script>"
-"function fetchLive(){"
-" fetch('/api/live').then(r=>r.json()).then(d=>{"
-"  document.getElementById('val_soil').innerText = d.soil_mv + ' mV';"
-"  document.getElementById('val_bmp').innerText = d.bmp_t + '°C | ' + d.bmp_p + ' hPa';"
-"  document.getElementById('val_dht').innerText = d.dht_t + '°C | ' + d.dht_h + '%';"
-" }).catch(e=>console.log(e));"
+/* ── Global last-known soil reading (mV) so percentage can be recomputed
+ *    whenever the user types new calibration bounds. ── */
+"var g_soil_mv = null;"
+
+/* ── Compute soil moisture % from mV + form calibration bounds.
+ *    Mirrors the C logic in hal_moisture_mv_to_percent(). ── */
+"function calcPct(mv){"
+" var dry=parseInt(document.getElementById('v_dry').value)||0;"
+" var wet=parseInt(document.getElementById('v_wet').value)||0;"
+" if(dry<=wet||mv<0) return null;"
+" if(mv>=dry) return 0;"
+" if(mv<=wet) return 100;"
+" return Math.round((dry-mv)*100/(dry-wet));"
 "}"
-"setInterval(fetchLive, 2000);"
+
+/* ── Update the soil metric card (percentage + progress bar). ── */
+"function updateSoilUI(){"
+" if(g_soil_mv===null) return;"
+" var pct=calcPct(g_soil_mv);"
+" var pctTxt=(pct!==null)?(pct+'%'):'-- %';"
+" document.getElementById('val_soil').innerText=pctTxt;"
+" var bar=document.getElementById('pct_bar');"
+" if(bar && pct!==null) bar.style.width=pct+'%';"
+"}"
+
+/* ── Fetch /api/status every 7 seconds and refresh all metric cards. ── */
+"function fetchStatus(){"
+" fetch('/api/status').then(r=>r.json()).then(d=>{"
+"  g_soil_mv=d.soil_mv;"
+"  updateSoilUI();"
+"  document.getElementById('val_bmp').innerText=d.bmp_t+'\\u00b0C | '+d.bmp_p+' hPa';"
+"  document.getElementById('val_dht').innerText=d.dht_t+'\\u00b0C | '+d.dht_h+'%';"
+"  /* Update raw mV hint next to calibration inputs */"
+"  var hint=document.getElementById('live_mv');"
+"  if(hint) hint.innerText='live: '+d.soil_mv+' mV';"
+" }).catch(e=>console.log('[status] fetch error:',e));"
+"}"
+"setInterval(fetchStatus,7000);"
+
+/* ── Re-run percentage when the user edits calibration bounds live. ── */
+"function onCalibInput(){ updateSoilUI(); }"
+
+/* ── Submit handler (save config + reboot). ── */
 "function saveCfg(e){"
 " e.preventDefault();"
-" let btn = document.getElementById('saveBtn');"
-" btn.innerText = 'SAVING & REBOOTING...'; btn.style.background = '#333'; btn.style.pointerEvents = 'none';"
-" let cfg = {"
-"  ssid: document.getElementById('ssid').value, pass: document.getElementById('pass').value,"
-"  tg_tok: document.getElementById('tg_tok').value, tg_chat: document.getElementById('tg_chat').value,"
-"  v_dry: parseInt(document.getElementById('v_dry').value), v_wet: parseInt(document.getElementById('v_wet').value)"
+" let btn=document.getElementById('saveBtn');"
+" btn.innerText='SAVING & REBOOTING...';btn.style.background='#333';btn.style.pointerEvents='none';"
+" let cfg={"
+"  ssid:document.getElementById('ssid').value,pass:document.getElementById('pass').value,"
+"  tg_tok:document.getElementById('tg_tok').value,tg_chat:document.getElementById('tg_chat').value,"
+"  v_dry:parseInt(document.getElementById('v_dry').value),v_wet:parseInt(document.getElementById('v_wet').value)"
 " };"
 " fetch('/api/save',{method:'POST',body:JSON.stringify(cfg)}).then(()=>{"
-"  setTimeout(() => window.location.reload(), 4000);"
+"  setTimeout(()=>window.location.reload(),4000);"
 " });"
 "}"
-"</script></head><body onload='fetchLive()'>"
+"</script></head><body onload='fetchStatus()'>"
 "<div class='container'>"
 "<div class='header'>"
 "<h1 class='logo'><span class='d'>d</span><span class='num'>7</span><span class='m'>main</span></h1>"
 "<div class='subtitle'>ESP32_EnvironmentalNode</div>"
 "</div>"
+
+/* ── Telemetry card ── */
 "<div class='card'>"
 "<h3>Live Telemetry</h3>"
 "<div class='grid'>"
-"<div class='metric'><span class='m-title'>🌱 Soil Moisture</span><span class='m-val' id='val_soil'>-- mV</span></div>"
-"<div class='metric'><span class='m-title'>🌡️ BMP280 (T/P)</span><span class='m-val' id='val_bmp'>--</span></div>"
-"<div class='metric'><span class='m-title'>💧 DHT22 (T/H)</span><span class='m-val' id='val_dht'>--</span></div>"
+/* Soil moisture: shows % in the main value, progress bar below */
+"<div class='metric' style='flex-direction:column;align-items:stretch;'>"
+" <div style='display:flex;justify-content:space-between;align-items:center;'>"
+"  <span class='m-title'>&#127807; Soil Moisture</span>"
+"  <span class='m-val' id='val_soil'>-- %</span>"
+" </div>"
+" <div class='pct-wrap'><div class='pct-bar' id='pct_bar' style='width:0%'></div></div>"
+"</div>"
+"<div class='metric'><span class='m-title'>&#127777;&#65039; BMP280 (T/P)</span><span class='m-val' id='val_bmp'>--</span></div>"
+"<div class='metric'><span class='m-title'>&#128167; DHT22 (T/H)</span><span class='m-val' id='val_dht'>--</span></div>"
 "</div>"
 "</div>"
+
+/* ── Config form card ── */
 "<div class='card'>"
 "<form onsubmit='saveCfg(event)'>"
 "<h3>Network Configuration</h3>"
@@ -111,14 +236,20 @@ static const char *html_page =
 "<h3 style='margin-top:30px;'>Telegram Integrations</h3>"
 "<div class='input-group'><label>Bot Token</label><input type='text' id='tg_tok' placeholder='123456:ABC-DEF...' required></div>"
 "<div class='input-group'><label>Chat ID</label><input type='text' id='tg_chat' placeholder='-100...' required></div>"
-"<h3 style='margin-top:30px;'>ADC Calibration</h3>"
+"<h3 style='margin-top:30px;'>ADC Calibration"
+/* Live mV hint rendered right inside the heading */
+" <span class='live-hint' id='live_mv'>live: -- mV</span>"
+"</h3>"
 "<div class='row'>"
-"<div class='input-group'><label>Dry Air (mV)</label><input type='number' id='v_dry' placeholder='2600' required></div>"
-"<div class='input-group'><label>Water (mV)</label><input type='number' id='v_wet' placeholder='1200' required></div>"
+"<div class='input-group'><label>Dry Air (mV)</label>"
+" <input type='number' id='v_dry' placeholder='2600' required oninput='onCalibInput()'></div>"
+"<div class='input-group'><label>Water (mV)</label>"
+" <input type='number' id='v_wet' placeholder='1200' required oninput='onCalibInput()'></div>"
 "</div>"
-"<button type='submit' class='btn' id='saveBtn'>Write to NVS & Reboot</button>"
+"<button type='submit' class='btn' id='saveBtn'>Write to NVS &amp; Reboot</button>"
 "</form>"
 "</div>"
+
 "<div class='footer'>"
 "&copy; 2026 ESP32_EnvironmentalNode<br>"
 "by <b style='color:#000;'>d<span style='color:var(--primary);'>7</span>main</b> (Demian Zaiats)<br>"
@@ -135,21 +266,44 @@ static esp_err_t http_get_index_handler(httpd_req_t *req) {
     return httpd_resp_send(req, html_page, HTTPD_RESP_USE_STRLEN);
 }
 
-static esp_err_t http_get_live_handler(httpd_req_t *req) {
-    int32_t soil_mv = hal_moisture_read_mv();
-    
-    bmp280_data_t bmp = {0};
-    hal_bmp280_read(&bmp); 
+/**
+ * @brief GET /api/status
+ *
+ *        Returns the latest sensor readings from the portal sensor cache.
+ *        The cache is populated every PORTAL_SENSOR_POLL_MS ms by
+ *        portal_sensor_task().  If no reading exists yet (first boot,
+ *        task hasn't fired), all numeric values will be 0 and "valid"
+ *        will be false.
+ *
+ *        JSON format:
+ *        {
+ *          "soil_mv": <int>,     raw ADC in millivolts
+ *          "bmp_t":   <float>,   BMP280 temperature °C
+ *          "bmp_p":   <float>,   BMP280 pressure hPa
+ *          "dht_t":   <float>,   DHT22 temperature °C
+ *          "dht_h":   <float>,   DHT22 humidity %
+ *          "valid":   <bool>     false until first poll completes
+ *        }
+ */
+static esp_err_t http_get_status_handler(httpd_req_t *req) {
+    /* Snapshot the cache under spinlock — the handler runs in its own task. */
+    portal_sensor_cache_t snap;
+    portENTER_CRITICAL(&s_cache_mux);
+    snap = s_cache;
+    portEXIT_CRITICAL(&s_cache_mux);
 
-    dht22_data_t dht = {0};
-    hal_dht22_read(&dht);
-
-    char json_buf[128];
-    snprintf(json_buf, sizeof(json_buf), 
-             "{\"soil_mv\":%ld,\"bmp_t\":%.1f,\"bmp_p\":%.1f,\"dht_t\":%.1f,\"dht_h\":%.1f}",
-             soil_mv, bmp.temperature, bmp.pressure, dht.temperature, dht.humidity);
+    char json_buf[160];
+    snprintf(json_buf, sizeof(json_buf),
+             "{\"soil_mv\":%ld,\"bmp_t\":%.1f,\"bmp_p\":%.1f"
+             ",\"dht_t\":%.1f,\"dht_h\":%.1f,\"valid\":%s}",
+             (long)snap.soil_mv,
+             snap.bmp_t, snap.bmp_p,
+             snap.dht_t, snap.dht_h,
+             snap.valid ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
+    /* Prevent browser caching — we always want fresh data. */
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, json_buf, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -235,18 +389,39 @@ void sys_wifi_start_ap_and_server(void) {
 
     ESP_LOGI(TAG, "AP Started. SSID: %s, PASS: %s", AP_WIFI_SSID, AP_WIFI_PASS);
 
+    /* ── Spawn the portal sensor task (Config Mode ONLY) ─────────────────────
+     * This task does NOT exist during the normal measure → deep-sleep path.
+     * It is created right here, inside sys_wifi_start_ap_and_server(), so it
+     * is guaranteed to be running iff we are serving the web portal. */
+    BaseType_t task_ok = xTaskCreate(
+        portal_sensor_task,
+        "portal_sensor",
+        PORTAL_SENSOR_STACK,
+        NULL,
+        PORTAL_SENSOR_PRIORITY,
+        NULL
+    );
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create portal_sensor_task! "
+                      "/api/status will return zeros until heap is available.");
+    } else {
+        ESP_LOGI(TAG, "portal_sensor_task spawned (poll every %u ms).",
+                 PORTAL_SENSOR_POLL_MS);
+    }
+
+    /* ── Start HTTP server and register all URI handlers ─────────────────── */
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 
     if (httpd_start(&server, &config) == ESP_OK) {
-        httpd_uri_t uri_index = { .uri = "/", .method = HTTP_GET, .handler = http_get_index_handler, .user_ctx = NULL };
-        httpd_uri_t uri_live  = { .uri = "/api/live", .method = HTTP_GET, .handler = http_get_live_handler, .user_ctx = NULL };
-        httpd_uri_t uri_save  = { .uri = "/api/save", .method = HTTP_POST, .handler = http_post_save_handler, .user_ctx = NULL };
+        httpd_uri_t uri_index  = { .uri = "/",           .method = HTTP_GET,  .handler = http_get_index_handler,  .user_ctx = NULL };
+        httpd_uri_t uri_status = { .uri = "/api/status", .method = HTTP_GET,  .handler = http_get_status_handler, .user_ctx = NULL };
+        httpd_uri_t uri_save   = { .uri = "/api/save",   .method = HTTP_POST, .handler = http_post_save_handler,  .user_ctx = NULL };
         
         httpd_register_uri_handler(server, &uri_index);
-        httpd_register_uri_handler(server, &uri_live);
+        httpd_register_uri_handler(server, &uri_status);
         httpd_register_uri_handler(server, &uri_save);
-        ESP_LOGI(TAG, "HTTP Server started on port 80");
+        ESP_LOGI(TAG, "HTTP Server started. Endpoints: GET /, GET /api/status, POST /api/save");
     }
 
     while (1) {
