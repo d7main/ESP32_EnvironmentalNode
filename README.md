@@ -12,7 +12,7 @@ An on-demand SoftAP Web Portal — launched by holding a physical button — han
 | :---: | :---: | :---: |
 | ![Web Configurator UI](https://github.com/user-attachments/assets/289511c9-2e68-44cc-9e47-d73a835792c4) | ![Hardware MVP](https://github.com/user-attachments/assets/02afec7f-1d40-4437-84a9-79e7a8dc2c39) | ![Wiring Schematic](https://github.com/user-attachments/assets/80fdf836-1b7c-4d12-b02d-9d38fc25a386) |
 
-> Replace placeholder paths in `docs/` with your own images.
+
 
 ---
 
