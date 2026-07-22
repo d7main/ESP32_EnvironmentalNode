@@ -10,9 +10,9 @@ An on-demand SoftAP Web Portal — launched by holding a physical button — han
 
 | Web Configurator | Bench Setup | Wiring Schematic |
 |:---:|:---:|:---:|
-| ![Web Configurator UI](<img width="1299" height="2560" alt="photo_2026-07-22_17-03-35" src="https://github.com/user-attachments/assets/289511c9-2e68-44cc-9e47-d73a835792c4" />) 
-| ![Hardware MVP](<img width="2560" height="1920" alt="photo_2026-07-22_17-03-37" src="https://github.com/user-attachments/assets/02afec7f-1d40-4437-84a9-79e7a8dc2c39" />) 
-| ![Wiring Schematic](<img width="667" height="683" alt="Snímek obrazovky 2026-07-22 170210" src="https://github.com/user-attachments/assets/80fdf836-1b7c-4d12-b02d-9d38fc25a386" />)
+| ![Web Configurator UI](<img width="1299" height="2560" alt="photo_2026-07-22_17-03-35" src="https://github.com/user-attachments/assets/289511c9-2e68-44cc-9e47-d73a835792c4" /> ) 
+| ![Hardware MVP](<img width="2560" height="1920" alt="photo_2026-07-22_17-03-37" src="https://github.com/user-attachments/assets/02afec7f-1d40-4437-84a9-79e7a8dc2c39" /> ) 
+| ![Wiring Schematic](<img width="667" height="683" alt="Snímek obrazovky 2026-07-22 170210" src="https://github.com/user-attachments/assets/80fdf836-1b7c-4d12-b02d-9d38fc25a386" /> )
 |
 
 > Replace placeholder paths in `docs/` with your own images.
