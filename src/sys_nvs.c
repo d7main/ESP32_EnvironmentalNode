@@ -75,6 +75,21 @@ bool sys_nvs_load_config(sys_config_t *out_cfg) {
         out_cfg->tg_chat_id[0] = '\0';
     }
 
+    len = SYS_WEBHOOK_URL_MAX_LEN;
+    if (nvs_get_str(handle, "disc_url", out_cfg->discord_webhook_url, &len) != ESP_OK) {
+        out_cfg->discord_webhook_url[0] = '\0';
+    }
+
+    len = SYS_WEBHOOK_URL_MAX_LEN;
+    if (nvs_get_str(handle, "cust_url", out_cfg->custom_webhook_url, &len) != ESP_OK) {
+        out_cfg->custom_webhook_url[0] = '\0';
+    }
+
+    // Load soil alert threshold; default to 30% if not previously saved
+    if (nvs_get_u8(handle, "soil_th_pct", &out_cfg->soil_alert_threshold_pct) != ESP_OK) {
+        out_cfg->soil_alert_threshold_pct = 30;
+    }
+
     // Load integer values safely. If missing, default to 0.
     if (nvs_get_i16(handle, "v_dry", &out_cfg->v_dry_mv) != ESP_OK) {
         out_cfg->v_dry_mv = 0;
@@ -111,14 +126,17 @@ bool sys_nvs_save_config(const sys_config_t *cfg) {
     }
 
     // Write all parameters to NVS
-    nvs_set_str(handle, "ssid", cfg->wifi_ssid);
-    nvs_set_str(handle, "pass", cfg->wifi_pass);
-    nvs_set_str(handle, "tg_tok", cfg->tg_token);
-    nvs_set_str(handle, "tg_chat", cfg->tg_chat_id);
-    
-    nvs_set_i16(handle, "v_dry", cfg->v_dry_mv);
-    nvs_set_i16(handle, "v_wet", cfg->v_wet_mv);
-    nvs_set_u8(handle, "conf", cfg->is_configured ? 1 : 0);
+    nvs_set_str(handle, "ssid",        cfg->wifi_ssid);
+    nvs_set_str(handle, "pass",        cfg->wifi_pass);
+    nvs_set_str(handle, "tg_tok",      cfg->tg_token);
+    nvs_set_str(handle, "tg_chat",     cfg->tg_chat_id);
+    nvs_set_str(handle, "disc_url",    cfg->discord_webhook_url);
+    nvs_set_str(handle, "cust_url",    cfg->custom_webhook_url);
+
+    nvs_set_i16(handle, "v_dry",       cfg->v_dry_mv);
+    nvs_set_i16(handle, "v_wet",       cfg->v_wet_mv);
+    nvs_set_u8(handle,  "soil_th_pct", cfg->soil_alert_threshold_pct);
+    nvs_set_u8(handle,  "conf",        cfg->is_configured ? 1 : 0);
 
     // Commit changes to flash memory
     esp_err_t err = nvs_commit(handle);

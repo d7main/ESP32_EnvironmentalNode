@@ -202,6 +202,8 @@ static const char *html_page =
 " let cfg={"
 "  ssid:document.getElementById('ssid').value,pass:document.getElementById('pass').value,"
 "  tg_tok:document.getElementById('tg_tok').value,tg_chat:document.getElementById('tg_chat').value,"
+"  disc_url:document.getElementById('disc_url').value,cust_url:document.getElementById('cust_url').value,"
+"  soil_th_pct:parseInt(document.getElementById('soil_th_pct').value)||30,"
 "  v_dry:parseInt(document.getElementById('v_dry').value),v_wet:parseInt(document.getElementById('v_wet').value)"
 " };"
 " fetch('/api/save',{method:'POST',body:JSON.stringify(cfg)}).then(()=>{"
@@ -238,9 +240,13 @@ static const char *html_page =
 "<h3>Network Configuration</h3>"
 "<div class='input-group'><label>Wi-Fi SSID</label><input type='text' id='ssid' placeholder='IoT_Network' required></div>"
 "<div class='input-group'><label>Wi-Fi Password</label><input type='password' id='pass' placeholder='Leave empty if open network'></div>"
-"<h3 style='margin-top:30px;'>Telegram Integrations</h3>"
-"<div class='input-group'><label>Bot Token</label><input type='text' id='tg_tok' placeholder='123456:ABC-DEF...' required></div>"
-"<div class='input-group'><label>Chat ID</label><input type='text' id='tg_chat' placeholder='-100...' required></div>"
+"<h3 style='margin-top:30px;'>Notification Settings</h3>"
+"<div class='input-group'><label>Telegram Bot Token <small style='font-weight:400;text-transform:none;'>(optional)</small></label><input type='text' id='tg_tok' placeholder='123456:ABC-DEF...'></div>"
+"<div class='input-group'><label>Telegram Chat ID <small style='font-weight:400;text-transform:none;'>(optional)</small></label><input type='text' id='tg_chat' placeholder='-100...'></div>"
+"<div class='input-group'><label>Discord Webhook URL <small style='font-weight:400;text-transform:none;'>(optional)</small></label><input type='url' id='disc_url' placeholder='https://discord.com/api/webhooks/...'></div>"
+"<div class='input-group'><label>Custom Webhook URL <small style='font-weight:400;text-transform:none;'>(optional)</small></label><input type='url' id='cust_url' placeholder='https://your-api.example.com/alert'></div>"
+"<h3 style='margin-top:30px;'>Alert Settings</h3>"
+"<div class='input-group'><label>Soil Alert Threshold (%)</label><input type='number' id='soil_th_pct' placeholder='30' min='0' max='100'></div>"
 "<h3 style='margin-top:30px;'>ADC Calibration"
 /* Live mV hint rendered right inside the heading */
 " <span class='live-hint' id='live_mv'>live: -- mV</span>"
@@ -321,9 +327,9 @@ static int safe_int(const cJSON *item, int fallback) {
 }
 
 static esp_err_t http_post_save_handler(httpd_req_t *req) {
-    char buf[512];
+    char buf[1300];  /* Sized for two 256-byte webhook URLs + JSON overhead */
     int ret, remaining = req->content_len;
-    if (remaining >= sizeof(buf)) {
+    if (remaining >= (int)sizeof(buf)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
         return ESP_FAIL;
     }
@@ -343,12 +349,15 @@ static esp_err_t http_post_save_handler(httpd_req_t *req) {
     memset(&cfg, 0, sizeof(sys_config_t));
 
     /* Use safe accessors — no raw pointer dereference on potentially-NULL items. */
-    strncpy(cfg.wifi_ssid,  safe_str(cJSON_GetObjectItem(root, "ssid")),    SYS_WIFI_SSID_MAX_LEN - 1);
-    strncpy(cfg.wifi_pass,  safe_str(cJSON_GetObjectItem(root, "pass")),    SYS_WIFI_PASS_MAX_LEN - 1);
-    strncpy(cfg.tg_token,   safe_str(cJSON_GetObjectItem(root, "tg_tok")),  SYS_TG_TOKEN_MAX_LEN  - 1);
-    strncpy(cfg.tg_chat_id, safe_str(cJSON_GetObjectItem(root, "tg_chat")), SYS_TG_CHAT_MAX_LEN   - 1);
-    cfg.v_dry_mv = (int16_t)safe_int(cJSON_GetObjectItem(root, "v_dry"), 0);
-    cfg.v_wet_mv = (int16_t)safe_int(cJSON_GetObjectItem(root, "v_wet"), 0);
+    strncpy(cfg.wifi_ssid,           safe_str(cJSON_GetObjectItem(root, "ssid")),      SYS_WIFI_SSID_MAX_LEN   - 1);
+    strncpy(cfg.wifi_pass,           safe_str(cJSON_GetObjectItem(root, "pass")),      SYS_WIFI_PASS_MAX_LEN   - 1);
+    strncpy(cfg.tg_token,            safe_str(cJSON_GetObjectItem(root, "tg_tok")),    SYS_TG_TOKEN_MAX_LEN    - 1);
+    strncpy(cfg.tg_chat_id,          safe_str(cJSON_GetObjectItem(root, "tg_chat")),   SYS_TG_CHAT_MAX_LEN     - 1);
+    strncpy(cfg.discord_webhook_url, safe_str(cJSON_GetObjectItem(root, "disc_url")),  SYS_WEBHOOK_URL_MAX_LEN - 1);
+    strncpy(cfg.custom_webhook_url,  safe_str(cJSON_GetObjectItem(root, "cust_url")),  SYS_WEBHOOK_URL_MAX_LEN - 1);
+    cfg.v_dry_mv                 = (int16_t)safe_int(cJSON_GetObjectItem(root, "v_dry"),       0);
+    cfg.v_wet_mv                 = (int16_t)safe_int(cJSON_GetObjectItem(root, "v_wet"),       0);
+    cfg.soil_alert_threshold_pct = (uint8_t)safe_int(cJSON_GetObjectItem(root, "soil_th_pct"), 30);
     cfg.is_configured = true;
 
     /* Require at minimum a non-empty SSID; reject the save if it is blank. */
@@ -481,27 +490,187 @@ bool sys_wifi_connect_sta(const char *ssid, const char *pass) {
     return false;
 }
 
-bool sys_wifi_send_telegram(const char *bot_token, const char *chat_id, const char *message) {
+/* ==========================================================================
+ * MULTI-CHANNEL ALERT DELIVERY
+ *
+ * Three independent static helpers — one per channel — plus the public
+ * sys_alerts_send() dispatcher that calls them all.  A failure (or missing
+ * credentials) on any one channel never prevents the others from running.
+ *
+ * All HTTP requests use cJSON for payload serialisation so that any special
+ * characters in the message (quotes, newlines, etc.) are safely escaped.
+ * Timeout is capped at 6 s per channel to avoid stalling the deep-sleep cycle.
+ * ========================================================================== */
+
+/**
+ * @brief Send via Telegram Bot API (internal helper, do not call directly).
+ */
+static bool send_telegram(const char *bot_token, const char *chat_id, const char *message) {
     char url[256];
-    char payload[256];
-    
     snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/sendMessage", bot_token);
-    snprintf(payload, sizeof(payload), "{\"chat_id\":\"%s\",\"text\":\"%s\"}", chat_id, message);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "chat_id", chat_id);
+    cJSON_AddStringToObject(root, "text",    message);
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!payload) {
+        ESP_LOGE(TAG, "[TELEGRAM] cJSON serialisation failed.");
+        return false;
+    }
 
     esp_http_client_config_t config = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = 5000,
-        .skip_cert_common_name_check = true 
+        .url                      = url,
+        .method                   = HTTP_METHOD_POST,
+        .timeout_ms               = 6000,
+        .skip_cert_common_name_check = true,
     };
-
     esp_http_client_handle_t client = esp_http_client_init(&config);
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_post_field(client, payload, strlen(payload));
 
-    esp_err_t err = esp_http_client_perform(client);
-    bool success = (err == ESP_OK && esp_http_client_get_status_code(client) == 200);
-    
+    esp_err_t err   = esp_http_client_perform(client);
+    int       status = esp_http_client_get_status_code(client);
+    bool      success = (err == ESP_OK && status == 200);
+
+    if (success) {
+        ESP_LOGI(TAG, "[TELEGRAM] Delivered OK (HTTP %d).", status);
+    } else {
+        ESP_LOGE(TAG, "[TELEGRAM] Failed: %s (HTTP %d).", esp_err_to_name(err), status);
+    }
+
     esp_http_client_cleanup(client);
+    free(payload);
     return success;
+}
+
+/**
+ * @brief POST to a Discord Webhook with payload {"content": message}.
+ */
+static bool send_discord(const char *webhook_url, const char *message) {
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "content", message);
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!payload) {
+        ESP_LOGE(TAG, "[DISCORD] cJSON serialisation failed.");
+        return false;
+    }
+
+    esp_http_client_config_t config = {
+        .url                      = webhook_url,
+        .method                   = HTTP_METHOD_POST,
+        .timeout_ms               = 6000,
+        .skip_cert_common_name_check = true,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, payload, strlen(payload));
+
+    esp_err_t err    = esp_http_client_perform(client);
+    int       status = esp_http_client_get_status_code(client);
+    /* Discord returns 204 No Content on success for webhook POSTs */
+    bool      success = (err == ESP_OK && status >= 200 && status < 300);
+
+    if (success) {
+        ESP_LOGI(TAG, "[DISCORD] Delivered OK (HTTP %d).", status);
+    } else {
+        ESP_LOGE(TAG, "[DISCORD] Failed: %s (HTTP %d).", esp_err_to_name(err), status);
+    }
+
+    esp_http_client_cleanup(client);
+    free(payload);
+    return success;
+}
+
+/**
+ * @brief POST to a Custom Webhook with full sensor JSON payload.
+ *
+ * Payload schema:
+ *   {"event":"alert","message":"...","soil_mv":1234,"temp":22.5,"humidity":65.0}
+ */
+static bool send_custom_webhook(const char *webhook_url, const char *message,
+                                int32_t soil_mv, float temp, float humidity) {
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "event",    "alert");
+    cJSON_AddStringToObject(root, "message",  message);
+    cJSON_AddNumberToObject(root, "soil_mv",  (double)soil_mv);
+    cJSON_AddNumberToObject(root, "temp",     (double)temp);
+    cJSON_AddNumberToObject(root, "humidity", (double)humidity);
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!payload) {
+        ESP_LOGE(TAG, "[CUSTOM_WH] cJSON serialisation failed.");
+        return false;
+    }
+
+    esp_http_client_config_t config = {
+        .url                      = webhook_url,
+        .method                   = HTTP_METHOD_POST,
+        .timeout_ms               = 6000,
+        .skip_cert_common_name_check = true,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, payload, strlen(payload));
+
+    esp_err_t err    = esp_http_client_perform(client);
+    int       status = esp_http_client_get_status_code(client);
+    bool      success = (err == ESP_OK && status >= 200 && status < 300);
+
+    if (success) {
+        ESP_LOGI(TAG, "[CUSTOM_WH] Delivered OK (HTTP %d).", status);
+    } else {
+        ESP_LOGE(TAG, "[CUSTOM_WH] Failed: %s (HTTP %d).", esp_err_to_name(err), status);
+    }
+
+    esp_http_client_cleanup(client);
+    free(payload);
+    return success;
+}
+
+/* --------------------------------------------------------------------------
+ * Public dispatcher
+ * -------------------------------------------------------------------------- */
+
+void sys_alerts_send(const sys_config_t *cfg, const char *message,
+                     int32_t soil_mv, float temp, float humidity)
+{
+    ESP_LOGI(TAG, "[ALERTS] Dispatching: \"%s\"", message);
+    bool any_ok = false;
+
+    /* ── Channel 1: Telegram ───────────────────────────────────────────── */
+    if (cfg->tg_token[0] != '\0' && cfg->tg_chat_id[0] != '\0') {
+        ESP_LOGI(TAG, "[ALERTS] -> Telegram: attempting delivery...");
+        if (send_telegram(cfg->tg_token, cfg->tg_chat_id, message)) any_ok = true;
+    } else {
+        ESP_LOGD(TAG, "[ALERTS] -> Telegram: skipped (credentials not configured).");
+    }
+
+    /* ── Channel 2: Discord Webhook ────────────────────────────────────── */
+    if (cfg->discord_webhook_url[0] != '\0') {
+        ESP_LOGI(TAG, "[ALERTS] -> Discord: attempting delivery...");
+        if (send_discord(cfg->discord_webhook_url, message)) any_ok = true;
+    } else {
+        ESP_LOGD(TAG, "[ALERTS] -> Discord: skipped (webhook URL not configured).");
+    }
+
+    /* ── Channel 3: Custom Webhook ─────────────────────────────────────── */
+    if (cfg->custom_webhook_url[0] != '\0') {
+        ESP_LOGI(TAG, "[ALERTS] -> Custom Webhook: attempting delivery...");
+        if (send_custom_webhook(cfg->custom_webhook_url, message,
+                                soil_mv, temp, humidity)) any_ok = true;
+    } else {
+        ESP_LOGD(TAG, "[ALERTS] -> Custom Webhook: skipped (URL not configured).");
+    }
+
+    if (!any_ok) {
+        ESP_LOGW(TAG, "[ALERTS] No channels delivered the alert. "
+                      "Check credentials/URLs and network connectivity.");
+    } else {
+        ESP_LOGI(TAG, "[ALERTS] Dispatch complete.");
+    }
 }

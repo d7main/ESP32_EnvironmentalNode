@@ -38,11 +38,15 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_event.h"
+#include "esp_sleep.h"
 #include "driver/gpio.h"
 
 #include "config.h"
 #include "sys_nvs.h"
 #include "sys_wifi.h"
+#include "hal_moisture.h"
+#include "hal_bmp280.h"
+#include "hal_dht22.h"
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Configuration
@@ -242,10 +246,14 @@ void app_main(void) {
     } else {
         /* ── Path B: Device is configured — normal operation ─────────────── */
         ESP_LOGI(TAG, "Device is configured. Starting normal operation.");
-        ESP_LOGI(TAG, "  SSID    : %s", cfg.wifi_ssid);
-        ESP_LOGI(TAG, "  TG Chat : %s", cfg.tg_chat_id);
-        ESP_LOGI(TAG, "  V_dry   : %d mV", cfg.v_dry_mv);
-        ESP_LOGI(TAG, "  V_wet   : %d mV", cfg.v_wet_mv);
+        ESP_LOGI(TAG, "  SSID       : %s", cfg.wifi_ssid);
+        ESP_LOGI(TAG, "  TG Token   : %s", cfg.tg_token[0]           ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  TG Chat    : %s", cfg.tg_chat_id[0]         ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  Discord WH : %s", cfg.discord_webhook_url[0] ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  Custom WH  : %s", cfg.custom_webhook_url[0]  ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  Threshold  : %d%%", (int)cfg.soil_alert_threshold_pct);
+        ESP_LOGI(TAG, "  V_dry      : %d mV", cfg.v_dry_mv);
+        ESP_LOGI(TAG, "  V_wet      : %d mV", cfg.v_wet_mv);
 
         /* ── Step 5: Spawn the button monitor task ────────────────────────── */
         /* The task runs in the background at low priority, polling GPIO9.
@@ -268,23 +276,87 @@ void app_main(void) {
                      BUTTON_CONFIG_PIN, BUTTON_HOLD_MS);
         }
 
-        /* ── TODO: Add your normal sensor-read / Telegram-send loop here ─── */
-        /* Example skeleton:
-         *
-         *   if (sys_wifi_connect_sta(cfg.wifi_ssid, cfg.wifi_pass)) {
-         *       // read sensors, build message, send Telegram notification
-         *   }
-         *
-         *   ESP_LOGI(TAG, "Entering deep sleep for %d seconds.",
-         *            DEFAULT_SLEEP_SEC);
-         *   esp_sleep_enable_timer_wakeup((uint64_t)DEFAULT_SLEEP_SEC * 1000000ULL);
-         *   esp_deep_sleep_start();
-         */
+        /* ── Step 6: Read sensors ─────────────────────────────────────────── */
+        /* Sensors self-initialise on first call (HAL layer manages handles). */
+        ESP_LOGI(TAG, "Reading sensors...");
 
-        /* Keep app_main alive (button task needs the scheduler running). */
-        ESP_LOGI(TAG, "app_main idle loop — button task is running in background.");
-        while (1) {
-            vTaskDelay(pdMS_TO_TICKS(10000));
+        int32_t    soil_mv = hal_moisture_read_mv();
+        bmp280_data_t bmp  = {0};
+        hal_bmp280_read(&bmp);
+        dht22_data_t  dht  = {0};
+        hal_dht22_read(&dht);
+
+        /* Calculate soil moisture % from user-calibrated ADC bounds.
+         * Mirrors the JavaScript calcPct() logic in the web portal.
+         * moisture_pct == -1 means calibration is not yet set. */
+        int moisture_pct = -1;
+        if (cfg.v_dry_mv > cfg.v_wet_mv && soil_mv >= 0) {
+            if      (soil_mv >= cfg.v_dry_mv) { moisture_pct = 0;   }
+            else if (soil_mv <= cfg.v_wet_mv) { moisture_pct = 100; }
+            else {
+                moisture_pct = (int32_t)(
+                    ((int32_t)cfg.v_dry_mv - soil_mv) * 100L /
+                    ((int32_t)cfg.v_dry_mv - (int32_t)cfg.v_wet_mv)
+                );
+            }
         }
+
+        ESP_LOGI(TAG, "Sensors: soil=%ld mV (%d%%) | "
+                      "BMP280: %.1f C / %.1f hPa | DHT22: %.1f C / %.1f%%",
+                 (long)soil_mv, moisture_pct,
+                 bmp.temperature, bmp.pressure,
+                 dht.temperature, dht.humidity);
+
+        /* ── Step 7: Connect WiFi and dispatch alert if threshold exceeded ── */
+        if (sys_wifi_connect_sta(cfg.wifi_ssid, cfg.wifi_pass)) {
+
+            if (moisture_pct < 0) {
+                /* Calibration not configured — log a hint, send anyway so the
+                 * user knows the node is alive, but skip threshold evaluation. */
+                ESP_LOGW(TAG, "Moisture %% uncalibrated (v_dry=%d mV, v_wet=%d mV). "
+                              "Set calibration in the portal to enable threshold alerts.",
+                         cfg.v_dry_mv, cfg.v_wet_mv);
+
+            } else if (moisture_pct < (int)cfg.soil_alert_threshold_pct) {
+
+                ESP_LOGW(TAG, "ALERT: Soil moisture %d%% is BELOW threshold %d%%!",
+                         moisture_pct, (int)cfg.soil_alert_threshold_pct);
+
+                /* Build a human-readable alert message.  cJSON will re-escape
+                 * it properly when building the webhook payloads. */
+                char alert_msg[256];
+                snprintf(alert_msg, sizeof(alert_msg),
+                         "Low soil moisture alert!\n"
+                         "Moisture: %d%% (threshold: %d%%)\n"
+                         "Raw ADC : %ld mV\n"
+                         "DHT22   : %.1f C / %.1f%% RH\n"
+                         "BMP280  : %.1f C / %.1f hPa",
+                         moisture_pct, (int)cfg.soil_alert_threshold_pct,
+                         (long)soil_mv,
+                         dht.temperature, dht.humidity,
+                         bmp.temperature, bmp.pressure);
+
+                sys_alerts_send(&cfg, alert_msg, soil_mv,
+                                dht.temperature, dht.humidity);
+
+            } else {
+                ESP_LOGI(TAG, "Soil moisture OK (%d%% >= threshold %d%%). No alert sent.",
+                         moisture_pct, (int)cfg.soil_alert_threshold_pct);
+            }
+
+        } else {
+            ESP_LOGE(TAG, "WiFi connection failed. Skipping notifications this cycle.");
+        }
+
+        /* ── Step 8: Enter deep sleep ──────────────────────────────────────── */
+        /* Give the TCP/IP stack a brief moment to flush before powering down. */
+        vTaskDelay(pdMS_TO_TICKS(200));
+        ESP_LOGI(TAG, "Entering deep sleep for %d seconds.", DEFAULT_SLEEP_SEC);
+        esp_sleep_enable_timer_wakeup((uint64_t)DEFAULT_SLEEP_SEC * 1000000ULL);
+        esp_deep_sleep_start();
+
+        /* ── Unreachable — esp_deep_sleep_start() does not return. ──────────── */
+        ESP_LOGE(TAG, "esp_deep_sleep_start() returned unexpectedly!");
+        while (1) { vTaskDelay(pdMS_TO_TICKS(5000)); }
     }
 }
