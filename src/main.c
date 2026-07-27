@@ -44,6 +44,7 @@
 #include "config.h"
 #include "sys_nvs.h"
 #include "sys_wifi.h"
+#include "sys_mqtt.h"
 #include "hal_moisture.h"
 #include "hal_bmp280.h"
 #include "hal_dht22.h"
@@ -247,10 +248,12 @@ void app_main(void) {
         /* ── Path B: Device is configured — normal operation ─────────────── */
         ESP_LOGI(TAG, "Device is configured. Starting normal operation.");
         ESP_LOGI(TAG, "  SSID       : %s", cfg.wifi_ssid);
-        ESP_LOGI(TAG, "  TG Token   : %s", cfg.tg_token[0]           ? "[SET]" : "[not configured]");
-        ESP_LOGI(TAG, "  TG Chat    : %s", cfg.tg_chat_id[0]         ? "[SET]" : "[not configured]");
-        ESP_LOGI(TAG, "  Discord WH : %s", cfg.discord_webhook_url[0] ? "[SET]" : "[not configured]");
-        ESP_LOGI(TAG, "  Custom WH  : %s", cfg.custom_webhook_url[0]  ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  TG Token   : %s", cfg.tg_token[0]            ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  TG Chat    : %s", cfg.tg_chat_id[0]          ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  Discord WH : %s", cfg.discord_webhook_url[0]  ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  Custom WH  : %s", cfg.custom_webhook_url[0]   ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  MQTT Broker: %s", cfg.mqtt_broker_uri[0]      ? cfg.mqtt_broker_uri : "[not configured]");
+        ESP_LOGI(TAG, "  MQTT Prefix: %s", cfg.mqtt_topic_prefix[0]    ? cfg.mqtt_topic_prefix : "(default)");
         ESP_LOGI(TAG, "  Threshold  : %d%%", (int)cfg.soil_alert_threshold_pct);
         ESP_LOGI(TAG, "  V_dry      : %d mV", cfg.v_dry_mv);
         ESP_LOGI(TAG, "  V_wet      : %d mV", cfg.v_wet_mv);
@@ -307,9 +310,15 @@ void app_main(void) {
                  bmp.temperature, bmp.pressure,
                  dht.temperature, dht.humidity);
 
-        /* ── Step 7: Connect WiFi and dispatch alert if threshold exceeded ── */
+        /* ── Step 7: Connect WiFi, publish MQTT, dispatch threshold alerts ── */
         if (sys_wifi_connect_sta(cfg.wifi_ssid, cfg.wifi_pass)) {
 
+            /* Step 7a: MQTT telemetry — runs every cycle regardless of threshold.
+             * Publishes HA Auto-Discovery configs + sensor state topics.
+             * No-op if cfg.mqtt_broker_uri is empty. */
+            sys_mqtt_publish(&cfg, soil_mv, moisture_pct, &bmp, &dht);
+
+            /* Step 7b: Threshold-based webhook alerts — independent of MQTT. */
             if (moisture_pct < 0) {
                 /* Calibration not configured — log a hint, send anyway so the
                  * user knows the node is alive, but skip threshold evaluation. */

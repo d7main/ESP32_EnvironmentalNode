@@ -204,6 +204,11 @@ static const char *html_page =
 "  tg_tok:document.getElementById('tg_tok').value,tg_chat:document.getElementById('tg_chat').value,"
 "  disc_url:document.getElementById('disc_url').value,cust_url:document.getElementById('cust_url').value,"
 "  soil_th_pct:parseInt(document.getElementById('soil_th_pct').value)||30,"
+"  mqtt_uri:document.getElementById('mqtt_uri').value,"
+"  mqtt_port:parseInt(document.getElementById('mqtt_port').value)||1883,"
+"  mqtt_user:document.getElementById('mqtt_user').value,"
+"  mqtt_pass:document.getElementById('mqtt_pass').value,"
+"  mqtt_prefix:document.getElementById('mqtt_prefix').value,"
 "  v_dry:parseInt(document.getElementById('v_dry').value),v_wet:parseInt(document.getElementById('v_wet').value)"
 " };"
 " fetch('/api/save',{method:'POST',body:JSON.stringify(cfg)}).then(()=>{"
@@ -247,6 +252,17 @@ static const char *html_page =
 "<div class='input-group'><label>Custom Webhook URL <small style='font-weight:400;text-transform:none;'>(optional)</small></label><input type='url' id='cust_url' placeholder='https://your-api.example.com/alert'></div>"
 "<h3 style='margin-top:30px;'>Alert Settings</h3>"
 "<div class='input-group'><label>Soil Alert Threshold (%)</label><input type='number' id='soil_th_pct' placeholder='30' min='0' max='100'></div>"
+"<h3 style='margin-top:30px;'>MQTT Settings</h3>"
+"<div class='input-group'><label>Broker Host / IP <small style='font-weight:400;text-transform:none;'>(optional &mdash; leave blank to disable)</small></label>"
+" <input type='text' id='mqtt_uri' placeholder='192.168.1.10 &nbsp; or &nbsp; mqtt://host:1883'></div>"
+"<div class='row'>"
+"<div class='input-group'><label>Port</label><input type='number' id='mqtt_port' placeholder='1883' min='1' max='65535'></div>"
+"<div class='input-group'><label>Topic Prefix</label><input type='text' id='mqtt_prefix' placeholder='d7main/sensor'></div>"
+"</div>"
+"<div class='input-group'><label>Username <small style='font-weight:400;text-transform:none;'>(optional)</small></label>"
+" <input type='text' id='mqtt_user' placeholder='homeassistant'></div>"
+"<div class='input-group'><label>Password <small style='font-weight:400;text-transform:none;'>(optional)</small></label>"
+" <input type='password' id='mqtt_pass' placeholder='(leave blank if not required)'></div>"
 "<h3 style='margin-top:30px;'>ADC Calibration"
 /* Live mV hint rendered right inside the heading */
 " <span class='live-hint' id='live_mv'>live: -- mV</span>"
@@ -327,7 +343,7 @@ static int safe_int(const cJSON *item, int fallback) {
 }
 
 static esp_err_t http_post_save_handler(httpd_req_t *req) {
-    char buf[1300];  /* Sized for two 256-byte webhook URLs + JSON overhead */
+    char buf[1800];  /* Sized for 5 MQTT fields + 2 webhook URLs + JSON overhead */
     int ret, remaining = req->content_len;
     if (remaining >= (int)sizeof(buf)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
@@ -349,15 +365,20 @@ static esp_err_t http_post_save_handler(httpd_req_t *req) {
     memset(&cfg, 0, sizeof(sys_config_t));
 
     /* Use safe accessors — no raw pointer dereference on potentially-NULL items. */
-    strncpy(cfg.wifi_ssid,           safe_str(cJSON_GetObjectItem(root, "ssid")),      SYS_WIFI_SSID_MAX_LEN   - 1);
-    strncpy(cfg.wifi_pass,           safe_str(cJSON_GetObjectItem(root, "pass")),      SYS_WIFI_PASS_MAX_LEN   - 1);
-    strncpy(cfg.tg_token,            safe_str(cJSON_GetObjectItem(root, "tg_tok")),    SYS_TG_TOKEN_MAX_LEN    - 1);
-    strncpy(cfg.tg_chat_id,          safe_str(cJSON_GetObjectItem(root, "tg_chat")),   SYS_TG_CHAT_MAX_LEN     - 1);
-    strncpy(cfg.discord_webhook_url, safe_str(cJSON_GetObjectItem(root, "disc_url")),  SYS_WEBHOOK_URL_MAX_LEN - 1);
-    strncpy(cfg.custom_webhook_url,  safe_str(cJSON_GetObjectItem(root, "cust_url")),  SYS_WEBHOOK_URL_MAX_LEN - 1);
-    cfg.v_dry_mv                 = (int16_t)safe_int(cJSON_GetObjectItem(root, "v_dry"),       0);
-    cfg.v_wet_mv                 = (int16_t)safe_int(cJSON_GetObjectItem(root, "v_wet"),       0);
-    cfg.soil_alert_threshold_pct = (uint8_t)safe_int(cJSON_GetObjectItem(root, "soil_th_pct"), 30);
+    strncpy(cfg.wifi_ssid,           safe_str(cJSON_GetObjectItem(root, "ssid")),         SYS_WIFI_SSID_MAX_LEN   - 1);
+    strncpy(cfg.wifi_pass,           safe_str(cJSON_GetObjectItem(root, "pass")),         SYS_WIFI_PASS_MAX_LEN   - 1);
+    strncpy(cfg.tg_token,            safe_str(cJSON_GetObjectItem(root, "tg_tok")),       SYS_TG_TOKEN_MAX_LEN    - 1);
+    strncpy(cfg.tg_chat_id,          safe_str(cJSON_GetObjectItem(root, "tg_chat")),      SYS_TG_CHAT_MAX_LEN     - 1);
+    strncpy(cfg.discord_webhook_url, safe_str(cJSON_GetObjectItem(root, "disc_url")),     SYS_WEBHOOK_URL_MAX_LEN - 1);
+    strncpy(cfg.custom_webhook_url,  safe_str(cJSON_GetObjectItem(root, "cust_url")),     SYS_WEBHOOK_URL_MAX_LEN - 1);
+    strncpy(cfg.mqtt_broker_uri,     safe_str(cJSON_GetObjectItem(root, "mqtt_uri")),     SYS_MQTT_URI_MAX_LEN    - 1);
+    strncpy(cfg.mqtt_username,       safe_str(cJSON_GetObjectItem(root, "mqtt_user")),    SYS_MQTT_USER_MAX_LEN   - 1);
+    strncpy(cfg.mqtt_password,       safe_str(cJSON_GetObjectItem(root, "mqtt_pass")),    SYS_MQTT_PASS_MAX_LEN   - 1);
+    strncpy(cfg.mqtt_topic_prefix,   safe_str(cJSON_GetObjectItem(root, "mqtt_prefix")),  SYS_MQTT_PREFIX_MAX_LEN - 1);
+    cfg.v_dry_mv                 = (int16_t) safe_int(cJSON_GetObjectItem(root, "v_dry"),        0);
+    cfg.v_wet_mv                 = (int16_t) safe_int(cJSON_GetObjectItem(root, "v_wet"),        0);
+    cfg.soil_alert_threshold_pct = (uint8_t) safe_int(cJSON_GetObjectItem(root, "soil_th_pct"),  30);
+    cfg.mqtt_port                = (uint16_t)safe_int(cJSON_GetObjectItem(root, "mqtt_port"),   1883);
     cfg.is_configured = true;
 
     /* Require at minimum a non-empty SSID; reject the save if it is blank. */

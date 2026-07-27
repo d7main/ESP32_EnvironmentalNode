@@ -85,6 +85,33 @@ bool sys_nvs_load_config(sys_config_t *out_cfg) {
         out_cfg->custom_webhook_url[0] = '\0';
     }
 
+    // ── MQTT (all optional — default to empty / standard defaults) ────────
+    len = SYS_MQTT_URI_MAX_LEN;
+    if (nvs_get_str(handle, "mqtt_uri", out_cfg->mqtt_broker_uri, &len) != ESP_OK) {
+        out_cfg->mqtt_broker_uri[0] = '\0';  /* empty = MQTT disabled */
+    }
+
+    len = SYS_MQTT_USER_MAX_LEN;
+    if (nvs_get_str(handle, "mqtt_user", out_cfg->mqtt_username, &len) != ESP_OK) {
+        out_cfg->mqtt_username[0] = '\0';
+    }
+
+    len = SYS_MQTT_PASS_MAX_LEN;
+    if (nvs_get_str(handle, "mqtt_pass", out_cfg->mqtt_password, &len) != ESP_OK) {
+        out_cfg->mqtt_password[0] = '\0';
+    }
+
+    len = SYS_MQTT_PREFIX_MAX_LEN;
+    if (nvs_get_str(handle, "mqtt_prefix", out_cfg->mqtt_topic_prefix, &len) != ESP_OK) {
+        /* Sensible default so HA topics work out-of-the-box */
+        strncpy(out_cfg->mqtt_topic_prefix, "d7main/sensor", SYS_MQTT_PREFIX_MAX_LEN - 1);
+        out_cfg->mqtt_topic_prefix[SYS_MQTT_PREFIX_MAX_LEN - 1] = '\0';
+    }
+
+    if (nvs_get_u16(handle, "mqtt_port", &out_cfg->mqtt_port) != ESP_OK) {
+        out_cfg->mqtt_port = 1883;
+    }
+
     // Load soil alert threshold; default to 30% if not previously saved
     if (nvs_get_u8(handle, "soil_th_pct", &out_cfg->soil_alert_threshold_pct) != ESP_OK) {
         out_cfg->soil_alert_threshold_pct = 30;
@@ -132,6 +159,13 @@ bool sys_nvs_save_config(const sys_config_t *cfg) {
     nvs_set_str(handle, "tg_chat",     cfg->tg_chat_id);
     nvs_set_str(handle, "disc_url",    cfg->discord_webhook_url);
     nvs_set_str(handle, "cust_url",    cfg->custom_webhook_url);
+
+    // ── MQTT ──────────────────────────────────────────────────────────────
+    nvs_set_str(handle, "mqtt_uri",    cfg->mqtt_broker_uri);
+    nvs_set_str(handle, "mqtt_user",   cfg->mqtt_username);
+    nvs_set_str(handle, "mqtt_pass",   cfg->mqtt_password);
+    nvs_set_str(handle, "mqtt_prefix", cfg->mqtt_topic_prefix);
+    nvs_set_u16(handle, "mqtt_port",   cfg->mqtt_port);
 
     nvs_set_i16(handle, "v_dry",       cfg->v_dry_mv);
     nvs_set_i16(handle, "v_wet",       cfg->v_wet_mv);
