@@ -39,6 +39,7 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_sleep.h"
+#include "esp_system.h"  /* esp_get_free_heap_size(), esp_get_minimum_free_heap_size() */
 #include "driver/gpio.h"
 
 #include "config.h"
@@ -189,6 +190,9 @@ void app_main(void) {
         ESP_LOGI(TAG, "NVS flash initialised OK.");
     }
 
+    ESP_LOGI(TAG, "[HEAP] Boot baseline — Free: %"PRIu32" B",
+             esp_get_free_heap_size());
+
     /* ── Step 2: TCP/IP stack and event loop ─────────────────────────────── */
     /* These are global IDF singletons.  They MUST be initialised exactly once.
      * Both sys_wifi_start_ap_and_server() and sys_wifi_connect_sta() depend
@@ -310,6 +314,9 @@ void app_main(void) {
                  bmp.temperature, bmp.pressure,
                  dht.temperature, dht.humidity);
 
+        ESP_LOGI(TAG, "[HEAP] After sensor reads — Free: %"PRIu32" B",
+                 esp_get_free_heap_size());
+
         /* ── Step 7: Connect WiFi, publish MQTT, dispatch threshold alerts ── */
         if (sys_wifi_connect_sta(cfg.wifi_ssid, cfg.wifi_pass)) {
 
@@ -317,6 +324,9 @@ void app_main(void) {
              * Publishes HA Auto-Discovery configs + sensor state topics.
              * No-op if cfg.mqtt_broker_uri is empty. */
             sys_mqtt_publish(&cfg, soil_mv, moisture_pct, &bmp, &dht);
+
+            ESP_LOGI(TAG, "[HEAP] After MQTT cycle — Free: %"PRIu32" B",
+                     esp_get_free_heap_size());
 
             /* Step 7b: Threshold-based webhook alerts — independent of MQTT. */
             if (moisture_pct < 0) {
@@ -360,6 +370,9 @@ void app_main(void) {
         /* ── Step 8: Enter deep sleep ──────────────────────────────────────── */
         /* Give the TCP/IP stack a brief moment to flush before powering down. */
         vTaskDelay(pdMS_TO_TICKS(200));
+        ESP_LOGI(TAG, "[HEAP] Pre-sleep — Free: %"PRIu32" B | Min-ever: %"PRIu32" B",
+                 esp_get_free_heap_size(),
+                 esp_get_minimum_free_heap_size());
         ESP_LOGI(TAG, "Entering deep sleep for %d seconds.", DEFAULT_SLEEP_SEC);
         esp_sleep_enable_timer_wakeup((uint64_t)DEFAULT_SLEEP_SEC * 1000000ULL);
         esp_deep_sleep_start();

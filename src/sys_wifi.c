@@ -548,6 +548,11 @@ static bool send_telegram(const char *bot_token, const char *chat_id, const char
         .skip_cert_common_name_check = true,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "[TELEGRAM] esp_http_client_init() failed — dropping payload.");
+        free(payload);
+        return false;
+    }
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_post_field(client, payload, strlen(payload));
 
@@ -587,6 +592,11 @@ static bool send_discord(const char *webhook_url, const char *message) {
         .skip_cert_common_name_check = true,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "[DISCORD] esp_http_client_init() failed — dropping payload.");
+        free(payload);
+        return false;
+    }
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_post_field(client, payload, strlen(payload));
 
@@ -635,6 +645,11 @@ static bool send_custom_webhook(const char *webhook_url, const char *message,
         .skip_cert_common_name_check = true,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "[CUSTOM_WH] esp_http_client_init() failed — dropping payload.");
+        free(payload);
+        return false;
+    }
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_post_field(client, payload, strlen(payload));
 
