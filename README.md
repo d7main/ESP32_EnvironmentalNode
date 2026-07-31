@@ -14,9 +14,12 @@ An on-demand SoftAP Web Portal — launched by holding a physical button — han
 
 
 
+---
 
+##  Roadmap (Future Plans)
 
-We are currently designing a custom PCB with integrated power management and MOSFET pump control. Track the hardware development progress here: #1
+We are currently designing a custom PCB with integrated power management and MOSFET pump control. 
+Track the hardware development progress here: #1
 
 ---
 
