@@ -19,7 +19,8 @@ An on-demand SoftAP Web Portal — launched by holding a physical button — han
 ##  Roadmap (Future Plans)
 
 We are currently designing a custom PCB with integrated power management and MOSFET pump control. 
-Track the hardware development progress here: [Feature: Custom PCB layout](#https://github.com/d7main/ESP32_EnvironmentalNode/issues/1)
+Track the hardware development progress here: [Feature: Custom PCB layout](https://github.com/d7main/ESP32_EnvironmentalNode/issues/1)
+
 ---
 
 ## Features
