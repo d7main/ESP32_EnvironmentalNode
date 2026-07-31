@@ -1,0 +1,44 @@
+name: Deploy MkDocs to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main          # re-deploy on every push to main
+  workflow_dispatch:  # allow manual trigger from the Actions tab
+
+permissions:
+  contents: write     # needed for mkdocs gh-deploy to push to gh-pages
+
+jobs:
+  deploy:
+    name: Build & Deploy MkDocs Site
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout with full history so git-revision-date plugins work ───
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Set Git identity for the gh-pages commit ───────────────────────
+      - name: Configure Git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # ── 3. Python + pip cache keyed on requirements file ──────────────────
+      - name: Set up Python 3.x
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: docs/requirements.txt
+
+      # ── 4. Install MkDocs Material and its dependencies ───────────────────
+      - name: Install dependencies
+        run: pip install -r docs/requirements.txt
+
+      # ── 5. Build and force-push to gh-pages ──────────────────────────────
+      - name: Deploy to GitHub Pages
+        run: mkdocs gh-deploy --force --clean --verbose

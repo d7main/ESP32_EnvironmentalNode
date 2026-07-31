@@ -1,0 +1,116 @@
+site_name: ESP32-C3 Environmental Node
+site_url: https://d7main.github.io/ESP32_EnvironmentalNode/
+site_description: >-
+  Low-power environmental monitoring firmware built with native ESP-IDF v5.x
+  and PlatformIO. Wakes from Deep Sleep, reads sensors, triggers multi-channel
+  alerts, and publishes to Home Assistant over MQTT.
+site_author: d7main
+
+repo_url: https://github.com/d7main/ESP32_EnvironmentalNode
+repo_name: d7main/ESP32_EnvironmentalNode
+edit_uri: ""  # disable "Edit on GitHub" pencil on every page
+
+copyright: Copyright &copy; 2024–2026 d7main &mdash; MIT License
+
+# ── Theme ────────────────────────────────────────────────────────────────────
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.tabs             # top-level sections as tabs
+    - navigation.tabs.sticky      # tabs stay visible while scrolling
+    - navigation.sections         # group sub-pages in the sidebar
+    - navigation.top              # back-to-top button
+    - navigation.footer           # prev / next links at page bottom
+    - content.code.copy           # copy button on every code block
+    - content.code.annotate       # inline code annotations
+    - toc.follow                  # TOC auto-highlights current section
+    - search.highlight
+    - search.suggest
+  icon:
+    repo: fontawesome/brands/github
+
+# ── Navigation ────────────────────────────────────────────────────────────────
+
+nav:
+  - Home: index.md
+  - Web Flasher: flasher.md
+  - Configuration: configuration.md
+  - Hardware: hardware.md
+
+# ── Markdown Extensions ───────────────────────────────────────────────────────
+
+markdown_extensions:
+  # Admonitions (note, tip, warning, danger, …)
+  - admonition
+  - pymdownx.details              # collapsible admonitions
+
+  # Code highlighting
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:         # fenced code blocks + mermaid diagrams
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+  # Tabbed content blocks
+  - pymdownx.tabbed:
+      alternate_style: true
+
+  # Task lists and keyboard keys
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.keys
+
+  # Emoji support
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+  # Standard extensions
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+      title: On this page
+
+# ── Plugins ───────────────────────────────────────────────────────────────────
+
+plugins:
+  - search:
+      lang: en
+
+# ── Extra ─────────────────────────────────────────────────────────────────────
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/d7main/ESP32_EnvironmentalNode
+      name: d7main on GitHub
+  analytics:
+    provider: google
+    property: ""   # set your GA4 measurement ID here if desired
