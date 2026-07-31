@@ -12,7 +12,14 @@ An on-demand SoftAP Web Portal — launched by holding a physical button — han
 |:---:|:---:|:---:|
 | ![Web Configurator UI](docs/web_ui_screenshot.png) | ![Hardware MVP](docs/hardware_mvp.jpg) | ![Wiring Schematic](docs/schematic.png) |
 
-> Replace placeholder paths in `docs/` with your own images.
+
+
+---
+
+##  Roadmap (Future Plans)
+
+We are currently designing a custom PCB with integrated power management and MOSFET pump control. 
+Track the hardware development progress here: [Feature: Custom PCB layout](https://github.com/d7main/ESP32_EnvironmentalNode/issues/1)
 
 ---
 
