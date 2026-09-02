@@ -6,6 +6,10 @@ An on-demand SoftAP Web Portal — launched by holding a physical button — han
 
 ---
 
+
+ **[Read the Documentation & Try the Web Flasher here](https://d7main.github.io/ESP32_EnvironmentalNode/)**
+
+---
 ## Hardware & Screenshots
 
 | Web Configurator | Bench Setup | Wiring Schematic |
