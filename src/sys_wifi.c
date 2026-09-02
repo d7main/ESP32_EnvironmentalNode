@@ -30,8 +30,14 @@
 
 static const char *TAG = "SYS_WIFI";
 static EventGroupHandle_t wifi_event_group;
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT      BIT1
+#define WIFI_CONNECTED_BIT   BIT0
+#define WIFI_FAIL_BIT        BIT1
+
+/** Maximum STA connection attempts before reporting failure. */
+#define WIFI_MAXIMUM_RETRY   3
+
+/** Retry counter — reset at the start of each sys_wifi_connect_sta() call. */
+static int s_retry_count = 0;
 
 /* ==========================================================================
  * PORTAL-MODE SENSOR GLOBALS
@@ -343,17 +349,30 @@ static int safe_int(const cJSON *item, int fallback) {
 }
 
 static esp_err_t http_post_save_handler(httpd_req_t *req) {
-    char buf[1800];  /* Sized for 5 MQTT fields + 2 webhook URLs + JSON overhead */
-    int ret, remaining = req->content_len;
+    /* Static buffer: keeps ~1800 B off the httpd task's 4096-byte stack,
+     * leaving room for cJSON (heap) and sys_config_t (~700 B local). */
+    static char buf[1800];
+    int remaining = req->content_len;
     if (remaining >= (int)sizeof(buf)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
         return ESP_FAIL;
     }
 
-    if ((ret = httpd_req_recv(req, buf, remaining)) <= 0) {
-        return ESP_FAIL;
+    /* Loop until all POST body bytes are received.  TCP may fragment the
+     * payload across multiple segments and httpd_req_recv() may return
+     * a short read — looping prevents truncated JSON and partial saves. */
+    int total = 0;
+    while (total < remaining) {
+        int ret = httpd_req_recv(req, buf + total, remaining - total);
+        if (ret <= 0) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue; /* transient socket timeout — retry */
+            }
+            return ESP_FAIL;
+        }
+        total += ret;
     }
-    buf[ret] = '\0';
+    buf[total] = '\0';
 
     cJSON *root = cJSON_Parse(buf);
     if (!root) {
@@ -405,13 +424,23 @@ static esp_err_t http_post_save_handler(httpd_req_t *req) {
  * WI-FI CONTROL LOGIC
  * ========================================================================== */
 
-static void wifi_event_handler(void* arg, esp_event_base_t base, int32_t id, void* data) {
+static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        s_retry_count = 0;
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        s_retry_count = 0;
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
+        if (s_retry_count < WIFI_MAXIMUM_RETRY) {
+            s_retry_count++;
+            ESP_LOGW(TAG, "[STA] Disconnected — retry %d/%d ...",
+                     s_retry_count, WIFI_MAXIMUM_RETRY);
+            esp_wifi_connect();
+        } else {
+            ESP_LOGE(TAG, "[STA] All %d retries exhausted.", WIFI_MAXIMUM_RETRY);
+            xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
+        }
     }
 }
 
@@ -484,31 +513,78 @@ void sys_wifi_start_ap_and_server(void) {
 bool sys_wifi_connect_sta(const char *ssid, const char *pass) {
     /* IMPORTANT: esp_netif_init() and esp_event_loop_create_default() must
      * be called ONCE by the caller (app_main) before invoking this function. */
+
+    /* Reset retry counter for this connection attempt. */
+    s_retry_count = 0;
+
     wifi_event_group = xEventGroupCreate();
-    esp_netif_create_default_wifi_sta();
+    if (!wifi_event_group) {
+        ESP_LOGE(TAG, "[STA] Failed to create EventGroup.");
+        return false;
+    }
+
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL);
+    /* Capture handler instances so they can be explicitly unregistered after
+     * the wait resolves, preventing stale callbacks on the freed event group. */
+    esp_event_handler_instance_t inst_wifi;
+    esp_event_handler_instance_t inst_ip;
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                        &wifi_event_handler, NULL, &inst_wifi);
+    esp_event_handler_instance_register(IP_EVENT,   IP_EVENT_STA_GOT_IP,
+                                        &wifi_event_handler, NULL, &inst_ip);
 
+    /* Copy SSID/password with explicit null-termination to prevent a stack
+     * read overflow when the caller supplies a maximum-length string. */
     wifi_config_t wifi_config = {0};
-    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
-    strncpy((char *)wifi_config.sta.password, pass, sizeof(wifi_config.sta.password));
+    strncpy((char *)wifi_config.sta.ssid,
+            ssid, sizeof(wifi_config.sta.ssid) - 1);
+    wifi_config.sta.ssid[sizeof(wifi_config.sta.ssid) - 1] = '\0';
+
+    strncpy((char *)wifi_config.sta.password,
+            pass, sizeof(wifi_config.sta.password) - 1);
+    wifi_config.sta.password[sizeof(wifi_config.sta.password) - 1] = '\0';
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    EventBits_t bits = xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(8000));
-    
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Connected to STA");
-        return true;
+    /* Wait for CONNECTED or FAIL (set by the handler after up to
+     * WIFI_MAXIMUM_RETRY attempts). */
+    EventBits_t bits = xEventGroupWaitBits(
+        wifi_event_group,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        pdFALSE, pdFALSE,
+        pdMS_TO_TICKS(8000));
+
+    bool connected = (bits & WIFI_CONNECTED_BIT) != 0;
+
+    /* ── Cleanup ─────────────────────────────────────────────────────────────
+     * Always unregister handlers and delete the event group — they serve no
+     * purpose beyond this point.  On failure or timeout, also stop the radio
+     * and free the driver + netif so that delayed events cannot write into
+     * the already-freed event group handle during the pre-sleep vTaskDelay. */
+    esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID,    inst_wifi);
+    esp_event_handler_instance_unregister(IP_EVENT,   IP_EVENT_STA_GOT_IP, inst_ip);
+    vEventGroupDelete(wifi_event_group);
+    wifi_event_group = NULL;
+
+    if (!connected) {
+        esp_wifi_stop();
+        esp_wifi_deinit();
+        esp_netif_destroy(sta_netif);
+        if (bits == 0) {
+            ESP_LOGE(TAG, "[STA] Connection timed out (no response in 8000 ms).");
+        } else {
+            ESP_LOGE(TAG, "[STA] Failed to connect to \"%s\".", ssid);
+        }
+    } else {
+        ESP_LOGI(TAG, "[STA] Connected to \"%s\".", ssid);
     }
-    ESP_LOGE(TAG, "Failed to connect to STA");
-    return false;
+    return connected;
 }
 
 /* ==========================================================================

@@ -57,18 +57,21 @@ bool hal_bmp280_init(void) {
         return false;
     }
 
-    calib.dig_T1 = (buf[1] << 8)  | buf[0];
-    calib.dig_T2 = (buf[3] << 8)  | buf[2];
-    calib.dig_T3 = (buf[5] << 8)  | buf[4];
-    calib.dig_P1 = (buf[7] << 8)  | buf[6];
-    calib.dig_P2 = (buf[9] << 8)  | buf[8];
-    calib.dig_P3 = (buf[11] << 8) | buf[10];
-    calib.dig_P4 = (buf[13] << 8) | buf[12];
-    calib.dig_P5 = (buf[15] << 8) | buf[14];
-    calib.dig_P6 = (buf[17] << 8) | buf[16];
-    calib.dig_P7 = (buf[19] << 8) | buf[18];
-    calib.dig_P8 = (buf[21] << 8) | buf[20];
-    calib.dig_P9 = (buf[23] << 8) | buf[22];
+    /* Explicit casts document the expected signedness of each coefficient
+     * (per the BMP280 datasheet) and prevent silent sign-extension errors
+     * if this code is ever widened to 32-bit intermediates. */
+    calib.dig_T1 = (uint16_t)((buf[1] << 8)  | buf[0]);
+    calib.dig_T2 = (int16_t) ((buf[3] << 8)  | buf[2]);
+    calib.dig_T3 = (int16_t) ((buf[5] << 8)  | buf[4]);
+    calib.dig_P1 = (uint16_t)((buf[7] << 8)  | buf[6]);
+    calib.dig_P2 = (int16_t) ((buf[9] << 8)  | buf[8]);
+    calib.dig_P3 = (int16_t) ((buf[11] << 8) | buf[10]);
+    calib.dig_P4 = (int16_t) ((buf[13] << 8) | buf[12]);
+    calib.dig_P5 = (int16_t) ((buf[15] << 8) | buf[14]);
+    calib.dig_P6 = (int16_t) ((buf[17] << 8) | buf[16]);
+    calib.dig_P7 = (int16_t) ((buf[19] << 8) | buf[18]);
+    calib.dig_P8 = (int16_t) ((buf[21] << 8) | buf[20]);
+    calib.dig_P9 = (int16_t) ((buf[23] << 8) | buf[22]);
 
     ESP_LOGI(TAG, "Initialized successfully");
     return true;

@@ -152,35 +152,57 @@ bool sys_nvs_save_config(const sys_config_t *cfg) {
         return false;
     }
 
-    // Write all parameters to NVS
-    nvs_set_str(handle, "ssid",        cfg->wifi_ssid);
-    nvs_set_str(handle, "pass",        cfg->wifi_pass);
-    nvs_set_str(handle, "tg_tok",      cfg->tg_token);
-    nvs_set_str(handle, "tg_chat",     cfg->tg_chat_id);
-    nvs_set_str(handle, "disc_url",    cfg->discord_webhook_url);
-    nvs_set_str(handle, "cust_url",    cfg->custom_webhook_url);
+    /* Check every write individually.  If any nvs_set_* call fails (e.g.
+     * ESP_ERR_NVS_NOT_ENOUGH_SPACE or a flash ECC error) we close without
+     * calling nvs_commit() so that a partial write is never persisted.
+     * A partial commit would leave is_configured = true with an empty SSID,
+     * creating an unrecoverable boot loop. */
+    esp_err_t err = ESP_OK;
+
+#define NVS_SET(fn, key, val)                                                    \
+    if (err == ESP_OK) {                                                         \
+        err = fn(handle, key, val);                                              \
+        if (err != ESP_OK) {                                                     \
+            ESP_LOGE(TAG, "nvs write failed [%s]: %s", key, esp_err_to_name(err)); \
+        }                                                                        \
+    }
+
+    NVS_SET(nvs_set_str, "ssid",        cfg->wifi_ssid)
+    NVS_SET(nvs_set_str, "pass",        cfg->wifi_pass)
+    NVS_SET(nvs_set_str, "tg_tok",      cfg->tg_token)
+    NVS_SET(nvs_set_str, "tg_chat",     cfg->tg_chat_id)
+    NVS_SET(nvs_set_str, "disc_url",    cfg->discord_webhook_url)
+    NVS_SET(nvs_set_str, "cust_url",    cfg->custom_webhook_url)
 
     // ── MQTT ──────────────────────────────────────────────────────────────
-    nvs_set_str(handle, "mqtt_uri",    cfg->mqtt_broker_uri);
-    nvs_set_str(handle, "mqtt_user",   cfg->mqtt_username);
-    nvs_set_str(handle, "mqtt_pass",   cfg->mqtt_password);
-    nvs_set_str(handle, "mqtt_prefix", cfg->mqtt_topic_prefix);
-    nvs_set_u16(handle, "mqtt_port",   cfg->mqtt_port);
+    NVS_SET(nvs_set_str, "mqtt_uri",    cfg->mqtt_broker_uri)
+    NVS_SET(nvs_set_str, "mqtt_user",   cfg->mqtt_username)
+    NVS_SET(nvs_set_str, "mqtt_pass",   cfg->mqtt_password)
+    NVS_SET(nvs_set_str, "mqtt_prefix", cfg->mqtt_topic_prefix)
+    NVS_SET(nvs_set_u16, "mqtt_port",   cfg->mqtt_port)
 
-    nvs_set_i16(handle, "v_dry",       cfg->v_dry_mv);
-    nvs_set_i16(handle, "v_wet",       cfg->v_wet_mv);
-    nvs_set_u8(handle,  "soil_th_pct", cfg->soil_alert_threshold_pct);
-    nvs_set_u8(handle,  "conf",        cfg->is_configured ? 1 : 0);
+    NVS_SET(nvs_set_i16, "v_dry",       cfg->v_dry_mv)
+    NVS_SET(nvs_set_i16, "v_wet",       cfg->v_wet_mv)
+    NVS_SET(nvs_set_u8,  "soil_th_pct", cfg->soil_alert_threshold_pct)
+    NVS_SET(nvs_set_u8,  "conf",        cfg->is_configured ? 1 : 0)
+
+#undef NVS_SET
+
+    if (err != ESP_OK) {
+        /* At least one write failed — do NOT commit the partial state. */
+        nvs_close(handle);
+        ESP_LOGE(TAG, "Aborting NVS save due to write error. Config unchanged.");
+        return false;
+    }
 
     // Commit changes to flash memory
-    esp_err_t err = nvs_commit(handle);
+    err = nvs_commit(handle);
     nvs_close(handle);
 
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "Configuration saved and committed to flash.");
         return true;
-    } else {
-        ESP_LOGE(TAG, "Failed to commit configuration to NVS! Error: %s", esp_err_to_name(err));
-        return false;
     }
+    ESP_LOGE(TAG, "Failed to commit configuration to NVS! Error: %s", esp_err_to_name(err));
+    return false;
 }

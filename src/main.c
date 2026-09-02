@@ -30,6 +30,7 @@
  *          GPIO9 (the on-board BOOT button) does not have this restriction.
  *
  * @author  d7main
+ * @contact demianzaiats@gmail.com
  * @license MIT
  */
 
@@ -49,6 +50,7 @@
 #include "hal_moisture.h"
 #include "hal_bmp280.h"
 #include "hal_dht22.h"
+#include "hal_i2c.h"
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Configuration
@@ -373,6 +375,28 @@ void app_main(void) {
         ESP_LOGI(TAG, "[HEAP] Pre-sleep — Free: %"PRIu32" B | Min-ever: %"PRIu32" B",
                  esp_get_free_heap_size(),
                  esp_get_minimum_free_heap_size());
+
+        /* De-initialise all peripherals before sleeping.
+         *
+         * Without this, the I2C driver leaves SCL and SDA configured as
+         * open-drain outputs.  When the peripheral clock is gated during deep
+         * sleep the pins float, causing leakage current through any external
+         * pull-up resistors and defeating the sub-mA sleep target.
+         *
+         * hal_i2c_deinit() calls i2c_driver_delete() then gpio_reset_pin()
+         * on both SDA and SCL, returning them to Hi-Z with no driver. */
+        hal_i2c_deinit();
+
+        /* Ensure the moisture-sensor power gate is off and its GPIO is Hi-Z.
+         * pwr_gate_disable() is already called at the end of hal_moisture_read_mv(),
+         * but an explicit reset here is the final safety net before sleep. */
+        gpio_set_level(SENSOR_POWER_PIN, 0);
+        gpio_reset_pin(SENSOR_POWER_PIN);
+
+        /* Return the DHT22 data pin to Hi-Z so the sensor's internal pull-up
+         * (if any) controls the line cleanly during sleep. */
+        gpio_reset_pin(DHT22_DATA_PIN);
+
         ESP_LOGI(TAG, "Entering deep sleep for %d seconds.", DEFAULT_SLEEP_SEC);
         esp_sleep_enable_timer_wakeup((uint64_t)DEFAULT_SLEEP_SEC * 1000000ULL);
         esp_deep_sleep_start();
