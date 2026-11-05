@@ -31,7 +31,7 @@ Flash the latest pre-built firmware directly from your browser — no local tool
 ## Installer
 
 <div style="display:flex; align-items:center; gap:1rem; flex-wrap:wrap; padding:1.5rem; border:1px solid var(--md-default-fg-color--lightest); border-radius:0.5rem; background:var(--md-code-bg-color);">
-  <esp-web-install-button manifest="manifest.json">
+  <esp-web-install-button manifest="../manifest.json">
     <button slot="activate" style="
       background:#009485;
       color:#fff;

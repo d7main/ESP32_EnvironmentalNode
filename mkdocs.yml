@@ -4,13 +4,13 @@ site_description: >-
   Low-power environmental monitoring firmware built with native ESP-IDF v5.x
   and PlatformIO. Wakes from Deep Sleep, reads sensors, triggers multi-channel
   alerts, and publishes to Home Assistant over MQTT.
-site_author: d7main
+site_author: Demian Zaiats (d7main), Artur Vlasenko
 
 repo_url: https://github.com/d7main/ESP32_EnvironmentalNode
 repo_name: d7main/ESP32_EnvironmentalNode
 edit_uri: ""  # disable "Edit on GitHub" pencil on every page
 
-copyright: Copyright &copy; 2024–2026 d7main &mdash; MIT License
+copyright: Copyright &copy; 2024–2026 d7main &amp; Artur Vlasenko &mdash; MIT License
 
 # ── Theme ────────────────────────────────────────────────────────────────────
 
