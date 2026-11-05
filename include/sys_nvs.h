@@ -14,6 +14,19 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* ── Active-sensor bitmask constants ─────────────────────────────────────────
+ *  Use these macros everywhere a specific sensor must be identified:
+ *  in the registry, the web portal JavaScript, and NVS load/save.
+ *  Adding a new sensor = assign the next free bit and add a HAL entry.
+ * ─────────────────────────────────────────────────────────────────────────── */
+#define SENSOR_BME280_BIT    (1UL << 0)   /**< BME280  — I2C  (Temp/Pressure/Humidity) */
+#define SENSOR_SHT3X_BIT     (1UL << 1)   /**< SHT3x   — I2C  (Temp/Humidity)          */
+#define SENSOR_BH1750_BIT    (1UL << 2)   /**< BH1750  — I2C  (Ambient Light)           */
+#define SENSOR_MHZ19_BIT     (1UL << 3)   /**< MH-Z19  — UART (CO2 ppm)                */
+#define SENSOR_PMS5003_BIT   (1UL << 4)   /**< PMS5003 — UART (PM2.5/PM10)             */
+#define SENSOR_MOISTURE_BIT  (1UL << 5)   /**< Capacitive — ADC (Soil Moisture)        */
+#define SENSOR_DS18B20_BIT   (1UL << 6)   /**< DS18B20 — 1-Wire (Temperature)          */
+
 /* ── String field length limits ──────────────────────────────────────────── */
 #define SYS_WIFI_SSID_MAX_LEN       32
 #define SYS_WIFI_PASS_MAX_LEN       64
@@ -57,6 +70,12 @@ typedef struct {
 
     /* ── Alert threshold ─────────────────────────────────────────────────── */
     uint8_t soil_alert_threshold_pct;  /* 0-100 %; default 30 */
+
+    /* ── Active sensor bitmask ────────────────────────────────────────────── */
+    /** Each bit corresponds to a SENSOR_*_BIT constant.  A set bit means the
+     *  sensor's init/read_data/deinit functions will be called this wake cycle.
+     *  Default (0) = all sensors off; user must opt-in via the portal.        */
+    uint32_t active_sensors;
 
     bool is_configured;
 } sys_config_t;

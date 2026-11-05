@@ -52,4 +52,21 @@ void sys_mqtt_publish(const sys_config_t *cfg,
                       const bmp280_data_t *bmp,
                       const dht22_data_t *dht);
 
+/**
+ * @brief Connect to the configured MQTT broker, publish a pre-built JSON
+ *        string to the state topic (<prefix>/state), then disconnect.
+ *
+ *        This is the preferred publish path when using the sensor registry:
+ *        app_main builds a cJSON object via the registry, serialises it to
+ *        a string, calls this function, then frees the string.
+ *
+ *        Safe to call even when MQTT is not configured — no-op when
+ *        cfg->mqtt_broker_uri is empty.
+ *
+ * @param cfg       Loaded device configuration (broker credentials, prefix).
+ * @param json_str  NULL-terminated JSON string.  Ownership is NOT transferred
+ *                  — the caller must free() it after this function returns.
+ */
+void sys_mqtt_publish_raw(const sys_config_t *cfg, const char *json_str);
+
 #endif /* SYS_MQTT_H */

@@ -439,3 +439,125 @@ void sys_mqtt_publish(const sys_config_t *cfg,
     esp_mqtt_client_destroy(client);
     vEventGroupDelete(evt_group);
 }
+
+/* ==========================================================================
+ * RAW JSON PUBLISH (sensor-registry path)
+ * ========================================================================== */
+
+/**
+ * @brief Publish a pre-serialised JSON string to <prefix>/state.
+ *
+ *        Reuses the same connect/drain/disconnect lifecycle as sys_mqtt_publish()
+ *        but skips HA Auto-Discovery (the registry path manages its own schema).
+ *        Called from app_main after the sensor registry has built the payload.
+ */
+void sys_mqtt_publish_raw(const sys_config_t *cfg, const char *json_str)
+{
+    if (cfg->mqtt_broker_uri[0] == '\0') {
+        ESP_LOGD(TAG, "[MQTT_RAW] Broker URI not configured. Skipping.");
+        return;
+    }
+    if (!json_str || json_str[0] == '\0') {
+        ESP_LOGW(TAG, "[MQTT_RAW] Empty JSON string — nothing to publish.");
+        return;
+    }
+
+    /* ── Derive device_id and topic prefix ─────────────────────────────── */
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char device_id[16];
+    snprintf(device_id, sizeof(device_id), "d7node_%02x%02x%02x",
+             mac[3], mac[4], mac[5]);
+
+    const char *prefix = cfg->mqtt_topic_prefix[0]
+                         ? cfg->mqtt_topic_prefix
+                         : MQTT_DEFAULT_PREFIX;
+
+    /* ── Build broker URI ────────────────────────────────────────────────── */
+    char uri[SYS_MQTT_URI_MAX_LEN + 30];
+    if (strncmp(cfg->mqtt_broker_uri, "mqtt", 4) == 0) {
+        snprintf(uri, sizeof(uri), "%s", cfg->mqtt_broker_uri);
+    } else {
+        uint16_t port = cfg->mqtt_port ? cfg->mqtt_port : 1883;
+        snprintf(uri, sizeof(uri), "mqtt://%s:%u", cfg->mqtt_broker_uri, port);
+    }
+
+    /* ── State and LWT topics ────────────────────────────────────────────── */
+    char state_topic[SYS_MQTT_PREFIX_MAX_LEN + 32];
+    snprintf(state_topic, sizeof(state_topic), "%s/%s/state", prefix, device_id);
+
+    char lwt_topic[SYS_MQTT_PREFIX_MAX_LEN + 32];
+    snprintf(lwt_topic, sizeof(lwt_topic), "%s/%s/status", prefix, device_id);
+
+    const char *username = cfg->mqtt_username[0] ? cfg->mqtt_username : NULL;
+    const char *password = cfg->mqtt_password[0] ? cfg->mqtt_password : NULL;
+
+    ESP_LOGI(TAG, "[MQTT_RAW] Publishing to %s → %s", uri, state_topic);
+
+    /* ── Create EventGroup and client ────────────────────────────────────── */
+    EventGroupHandle_t evt_group = xEventGroupCreate();
+    if (!evt_group) {
+        ESP_LOGE(TAG, "[MQTT_RAW] Failed to create EventGroup.");
+        return;
+    }
+
+    mqtt_evt_ctx_t ctx = { .evt_group = evt_group };
+
+    esp_mqtt_client_config_t mqtt_cfg = {
+        .broker.address.uri                        = uri,
+        .credentials.username                      = username,
+        .credentials.authentication.password       = password,
+        .session.last_will.topic                   = lwt_topic,
+        .session.last_will.msg                     = "offline",
+        .session.last_will.msg_len                 = 7,
+        .session.last_will.retain                  = 1,
+        .session.last_will.qos                     = 1,
+        .network.timeout_ms                        = MQTT_CONNECT_TIMEOUT_MS,
+    };
+
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    if (!client) {
+        ESP_LOGE(TAG, "[MQTT_RAW] esp_mqtt_client_init() failed.");
+        vEventGroupDelete(evt_group);
+        return;
+    }
+
+    esp_mqtt_client_register_event(client,
+                                   (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID,
+                                   mqtt_event_handler,
+                                   &ctx);
+    esp_mqtt_client_start(client);
+
+    EventBits_t bits = xEventGroupWaitBits(
+        evt_group,
+        MQTT_CONNECTED_BIT | MQTT_ERROR_BIT,
+        pdFALSE, pdFALSE,
+        pdMS_TO_TICKS(MQTT_CONNECT_TIMEOUT_MS)
+    );
+
+    if (bits & MQTT_CONNECTED_BIT) {
+        /* Publish "online" to status topic (retained) */
+        esp_mqtt_client_publish(client, lwt_topic, "online", 6, 0, 1);
+
+        /* Publish the JSON payload to the state topic (QoS 0, no retain) */
+        int msg_id = esp_mqtt_client_publish(client, state_topic,
+                                             json_str, strlen(json_str), 0, 0);
+        if (msg_id < 0) {
+            ESP_LOGE(TAG, "[MQTT_RAW] Publish failed (msg_id=%d)", msg_id);
+        } else {
+            ESP_LOGI(TAG, "[MQTT_RAW] Published %d bytes to %s",
+                     (int)strlen(json_str), state_topic);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(MQTT_DRAIN_DELAY_MS));
+
+    } else if (bits & MQTT_ERROR_BIT) {
+        ESP_LOGE(TAG, "[MQTT_RAW] Broker connection error.");
+    } else {
+        ESP_LOGE(TAG, "[MQTT_RAW] Connection timed out.");
+    }
+
+    esp_mqtt_client_stop(client);
+    esp_mqtt_client_destroy(client);
+    vEventGroupDelete(evt_group);
+}

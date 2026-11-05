@@ -200,26 +200,63 @@ static const char *html_page =
 /* ── Re-run percentage when the user edits calibration bounds live. ── */
 "function onCalibInput(){ updateSoilUI(); }"
 
-/* ── Submit handler (save config + reboot). ── */
+/* ── Profile presets: auto-check sensors for each profile. ── */
+"var SENSOR_PROFILES={'indoor':['bme280','mhz19','pms5003'],'greenhouse':['bme280','moisture','ds18b20'],'custom':[];};"
+"function applyProfile(){"
+" var prof=document.getElementById('sensor_profile').value;"
+" ['bme280','sht3x','bh1750','mhz19','pms5003','moisture','ds18b20'].forEach(function(s){"
+"  var el=document.getElementById('sen_'+s);"
+"  if(el) el.checked=(SENSOR_PROFILES[prof]||[]).indexOf(s)>=0;"
+" });"
+"}"
+
+/* ── Build active_sensors bitmask from checked checkboxes. ── */
+"var SENSOR_BITS={bme280:1,sht3x:2,bh1750:4,mhz19:8,pms5003:16,moisture:32,ds18b20:64};"
+"function buildSensorMask(){"
+" var mask=0;"
+" Object.keys(SENSOR_BITS).forEach(function(k){"
+"  var el=document.getElementById('sen_'+k); if(el&&el.checked) mask|=SENSOR_BITS[k];"
+" }); return mask;"
+"}"
+
+/* ── Submit handler: write hidden inputs then POST the form natively. ──
+ *
+ *    We use a native HTML form submit (not fetch) for three reasons:
+ *    1. The browser manages the HTTP POST — no JS promise chain to break.
+ *    2. The board resets before sending a response; a native form submit
+ *       tolerates that by just showing an empty page (or navigating away).
+ *    3. No JSON serialisation — no risk of NaN/null corrupting the payload.
+ * ── */
 "function saveCfg(e){"
 " e.preventDefault();"
-" let btn=document.getElementById('saveBtn');"
-" btn.innerText='SAVING & REBOOTING...';btn.style.background='#333';btn.style.pointerEvents='none';"
-" let cfg={"
-"  ssid:document.getElementById('ssid').value,pass:document.getElementById('pass').value,"
-"  tg_tok:document.getElementById('tg_tok').value,tg_chat:document.getElementById('tg_chat').value,"
-"  disc_url:document.getElementById('disc_url').value,cust_url:document.getElementById('cust_url').value,"
-"  soil_th_pct:parseInt(document.getElementById('soil_th_pct').value)||30,"
-"  mqtt_uri:document.getElementById('mqtt_uri').value,"
-"  mqtt_port:parseInt(document.getElementById('mqtt_port').value)||1883,"
-"  mqtt_user:document.getElementById('mqtt_user').value,"
-"  mqtt_pass:document.getElementById('mqtt_pass').value,"
-"  mqtt_prefix:document.getElementById('mqtt_prefix').value,"
-"  v_dry:parseInt(document.getElementById('v_dry').value),v_wet:parseInt(document.getElementById('v_wet').value)"
-" };"
-" fetch('/api/save',{method:'POST',body:JSON.stringify(cfg)}).then(()=>{"
-"  setTimeout(()=>window.location.reload(),4000);"
-" });"
+" try{"
+"  var btn=document.getElementById('saveBtn');"
+"  btn.innerText='SAVING & REBOOTING...';btn.style.background='#333';btn.style.pointerEvents='none';"
+
+/* Compute bitmask and write to hidden field. */
+"  document.getElementById('sensors_mask').value=buildSensorMask();"
+
+/* Populate every hidden field from the visible inputs. */
+"  var ids=['ssid','pass','tg_tok','tg_chat','disc_url','cust_url',"
+"   'soil_th_pct','mqtt_uri','mqtt_port','mqtt_user','mqtt_pass','mqtt_prefix',"
+"   'v_dry','v_wet'];"
+"  ids.forEach(function(id){"
+"   var src=document.getElementById(id);"
+"   var dst=document.getElementById('h_'+id);"
+"   if(src&&dst) dst.value=src.value;"
+"  });"
+
+/* Apply numeric defaults for optional fields before submitting. */
+"  if(!document.getElementById('h_v_dry').value) document.getElementById('h_v_dry').value='3000';"
+"  if(!document.getElementById('h_v_wet').value) document.getElementById('h_v_wet').value='1500';"
+"  if(!document.getElementById('h_soil_th_pct').value) document.getElementById('h_soil_th_pct').value='30';"
+"  if(!document.getElementById('h_mqtt_port').value) document.getElementById('h_mqtt_port').value='1883';"
+
+/* Submit the real form. */
+"  document.getElementById('cfgForm').submit();"
+" }catch(err){"
+"  alert('JS error before submit: '+err.message);"
+" }"
 "}"
 "</script></head><body onload='fetchStatus()'>"
 "<div class='container'>"
@@ -247,9 +284,29 @@ static const char *html_page =
 
 /* ── Config form card ── */
 "<div class='card'>"
-"<form onsubmit='saveCfg(event)'>"
+/* One real form that POSTs all fields as application/x-www-form-urlencoded.
+ * All visible inputs feed into matching hidden inputs via saveCfg() before
+ * the native form.submit() — this avoids any fetch/JSON fragility. */
+"<form id='cfgForm' action='/api/save' method='POST' onsubmit='saveCfg(event)'>"
+
+/* ── Hidden inputs (carry every config value to the backend) ── */
+"<input type='hidden' id='h_ssid'        name='ssid'        value=''>"
+"<input type='hidden' id='h_pass'        name='pass'        value=''>"
+"<input type='hidden' id='h_tg_tok'      name='tg_tok'      value=''>"
+"<input type='hidden' id='h_tg_chat'     name='tg_chat'     value=''>"
+"<input type='hidden' id='h_disc_url'    name='disc_url'    value=''>"
+"<input type='hidden' id='h_cust_url'    name='cust_url'    value=''>"
+"<input type='hidden' id='h_soil_th_pct' name='soil_th_pct' value='30'>"
+"<input type='hidden' id='h_mqtt_uri'    name='mqtt_uri'    value=''>"
+"<input type='hidden' id='h_mqtt_port'   name='mqtt_port'   value='1883'>"
+"<input type='hidden' id='h_mqtt_user'   name='mqtt_user'   value=''>"
+"<input type='hidden' id='h_mqtt_pass'   name='mqtt_pass'   value=''>"
+"<input type='hidden' id='h_mqtt_prefix' name='mqtt_prefix' value=''>"
+"<input type='hidden' id='h_v_dry'       name='v_dry'       value='3000'>"
+"<input type='hidden' id='h_v_wet'       name='v_wet'       value='1500'>"
+"<input type='hidden' id='sensors_mask'  name='sensors'     value='0'>"
 "<h3>Network Configuration</h3>"
-"<div class='input-group'><label>Wi-Fi SSID</label><input type='text' id='ssid' placeholder='IoT_Network' required></div>"
+"<div class='input-group'><label>Wi-Fi SSID</label><input type='text' id='ssid' placeholder='IoT_Network'></div>"
 "<div class='input-group'><label>Wi-Fi Password</label><input type='password' id='pass' placeholder='Leave empty if open network'></div>"
 "<h3 style='margin-top:30px;'>Notification Settings</h3>"
 "<div class='input-group'><label>Telegram Bot Token <small style='font-weight:400;text-transform:none;'>(optional)</small></label><input type='text' id='tg_tok' placeholder='123456:ABC-DEF...'></div>"
@@ -269,15 +326,35 @@ static const char *html_page =
 " <input type='text' id='mqtt_user' placeholder='homeassistant'></div>"
 "<div class='input-group'><label>Password <small style='font-weight:400;text-transform:none;'>(optional)</small></label>"
 " <input type='password' id='mqtt_pass' placeholder='(leave blank if not required)'></div>"
+"<h3 style='margin-top:30px;'>Sensor Configuration</h3>"
+"<div class='input-group'><label>Global Profile</label>"
+"<select id='sensor_profile' onchange='applyProfile()' style='width:100%;padding:14px;border:2px solid #e1e4e8;border-radius:10px;font-size:1rem;box-sizing:border-box;background:#fefefe;'>"
+"<option value='custom'>&#9881; Custom (Manual Selection)</option>"
+"<option value='indoor'>&#127968; Indoor Air Quality &mdash; BME280 + MH-Z19 + PMS5003</option>"
+"<option value='greenhouse'>&#127807; Greenhouse &mdash; BME280 + Moisture + DS18B20</option>"
+"</select></div>"
+"<div style='margin-top:16px;'><label style='display:block;font-size:0.85rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;'>&#128267; I&sup2;C Bus</label>"
+"<label style='display:flex;align-items:center;gap:10px;font-weight:600;cursor:pointer;margin-bottom:6px;'><input type='checkbox' id='sen_bme280' style='width:18px;height:18px;accent-color:#FF6600;'> BME280 &mdash; Temp / Pressure / Humidity</label>"
+"<label style='display:flex;align-items:center;gap:10px;font-weight:600;cursor:pointer;margin-bottom:6px;'><input type='checkbox' id='sen_sht3x' style='width:18px;height:18px;accent-color:#FF6600;'> SHT3x &mdash; Temp / Humidity</label>"
+"<label style='display:flex;align-items:center;gap:10px;font-weight:600;cursor:pointer;margin-bottom:14px;'><input type='checkbox' id='sen_bh1750' style='width:18px;height:18px;accent-color:#FF6600;'> BH1750 &mdash; Ambient Light (lux)</label>"
+"<label style='display:block;font-size:0.85rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;'>&#128225; UART Bus</label>"
+"<label style='display:flex;align-items:center;gap:10px;font-weight:600;cursor:pointer;margin-bottom:6px;'><input type='checkbox' id='sen_mhz19' style='width:18px;height:18px;accent-color:#FF6600;'> MH-Z19 &mdash; CO&#8322; (ppm)</label>"
+"<label style='display:flex;align-items:center;gap:10px;font-weight:600;cursor:pointer;margin-bottom:14px;'><input type='checkbox' id='sen_pms5003' style='width:18px;height:18px;accent-color:#FF6600;'> PMS5003 &mdash; PM2.5 / PM10 Particulates</label>"
+"<label style='display:block;font-size:0.85rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;'>&#127807; ADC / 1-Wire</label>"
+"<label style='display:flex;align-items:center;gap:10px;font-weight:600;cursor:pointer;margin-bottom:6px;'><input type='checkbox' id='sen_moisture' style='width:18px;height:18px;accent-color:#FF6600;'> Capacitive Moisture Sensor (ADC)</label>"
+"<label style='display:flex;align-items:center;gap:10px;font-weight:600;cursor:pointer;'><input type='checkbox' id='sen_ds18b20' style='width:18px;height:18px;accent-color:#FF6600;'> DS18B20 &mdash; 1-Wire Temperature</label>"
+"</div>"
+
 "<h3 style='margin-top:30px;'>ADC Calibration"
-/* Live mV hint rendered right inside the heading */
+/* Live mV hint + optional note */
 " <span class='live-hint' id='live_mv'>live: -- mV</span>"
+" <small style='font-weight:400;font-size:0.78rem;color:#999;margin-left:8px;'>(optional — defaults: dry=3000 mV, wet=1500 mV)</small>"
 "</h3>"
 "<div class='row'>"
 "<div class='input-group'><label>Dry Air (mV)</label>"
-" <input type='number' id='v_dry' placeholder='2600' required oninput='onCalibInput()'></div>"
+" <input type='number' id='v_dry' placeholder='2600' oninput='onCalibInput()'></div>"
 "<div class='input-group'><label>Water (mV)</label>"
-" <input type='number' id='v_wet' placeholder='1200' required oninput='onCalibInput()'></div>"
+" <input type='number' id='v_wet' placeholder='1200' oninput='onCalibInput()'></div>"
 "</div>"
 "<button type='submit' class='btn' id='saveBtn'>Write to NVS &amp; Reboot</button>"
 "</form>"
@@ -333,88 +410,123 @@ static esp_err_t http_get_status_handler(httpd_req_t *req) {
     return httpd_resp_send(req, json_buf, HTTPD_RESP_USE_STRLEN);
 }
 
-/* BUG FIX #2 helpers: cJSON_GetObjectItem() returns NULL when a key is
- * missing, has the wrong type, or the browser sends NaN (from parseInt on
- * an empty field, serialised as null by JSON.stringify).  The original code
- * dereferenced the NULL pointer directly, causing an immediate panic and a
- * partial NVS write that corrupted the config and created a boot loop. */
-static const char *safe_str(const cJSON *item) {
-    if (!item || !cJSON_IsString(item) || !item->valuestring) return "";
-    return item->valuestring;
-}
-
-static int safe_int(const cJSON *item, int fallback) {
-    if (!item || !cJSON_IsNumber(item)) return fallback;
-    return item->valueint;
-}
-
 static esp_err_t http_post_save_handler(httpd_req_t *req) {
-    /* Static buffer: keeps ~1800 B off the httpd task's 4096-byte stack,
-     * leaving room for cJSON (heap) and sys_config_t (~700 B local). */
-    static char buf[1800];
+    /* ── Receive the URL-encoded POST body ─────────────────────────────────
+     * The browser sends: ssid=Foo&pass=Bar&sensors=42&...
+     * httpd_query_key_value() parses it without any heap allocation.
+     * Static buffer keeps the raw body off the httpd task's 4096-byte stack. */
+    static char body[1800];
     int remaining = req->content_len;
-    if (remaining >= (int)sizeof(buf)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
+    if (remaining <= 0 || remaining >= (int)sizeof(body)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            remaining <= 0 ? "Empty body" : "Payload too large");
         return ESP_FAIL;
     }
 
-    /* Loop until all POST body bytes are received.  TCP may fragment the
-     * payload across multiple segments and httpd_req_recv() may return
-     * a short read — looping prevents truncated JSON and partial saves. */
+    /* Receive all bytes — TCP may fragment. */
     int total = 0;
     while (total < remaining) {
-        int ret = httpd_req_recv(req, buf + total, remaining - total);
+        int ret = httpd_req_recv(req, body + total, remaining - total);
         if (ret <= 0) {
-            if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
-                continue; /* transient socket timeout — retry */
-            }
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
             return ESP_FAIL;
         }
         total += ret;
     }
-    buf[total] = '\0';
+    body[total] = '\0';
+    ESP_LOGI(TAG, "[SAVE] Raw POST body (%d B): %.200s%s",
+             total, body, total > 200 ? "..." : "");
 
-    cJSON *root = cJSON_Parse(buf);
-    if (!root) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
-        return ESP_FAIL;
-    }
+    /* ── Field extractor macro ─────────────────────────────────────────────
+     * httpd_query_key_value() URL-decodes the value in-place.  We always
+     * null-terminate on success; on failure the field stays as its init value. */
+    char tmp[256];
+#define GET_STR(key_, dst_, max_len_)                                          \
+    do {                                                                        \
+        if (httpd_query_key_value(body, key_, tmp, sizeof(tmp)) == ESP_OK) {   \
+            strncpy(dst_, tmp, (max_len_) - 1);                                \
+            dst_[(max_len_) - 1] = '\0';                                       \
+        }                                                                       \
+    } while (0)
+
+#define GET_STR_IF_NOT_EMPTY(key_, dst_, max_len_)                             \
+    do {                                                                        \
+        if (httpd_query_key_value(body, key_, tmp, sizeof(tmp)) == ESP_OK) {   \
+            if (strlen(tmp) > 0) {                                             \
+                strncpy(dst_, tmp, (max_len_) - 1);                            \
+                dst_[(max_len_) - 1] = '\0';                                   \
+            }                                                                   \
+        }                                                                       \
+    } while (0)
+
+#define GET_INT(key_, fallback_)                                               \
+    (httpd_query_key_value(body, key_, tmp, sizeof(tmp)) == ESP_OK             \
+         ? (int)strtol(tmp, NULL, 10)                                          \
+         : (fallback_))
+
+#define GET_U32(key_, fallback_)                                               \
+    (httpd_query_key_value(body, key_, tmp, sizeof(tmp)) == ESP_OK             \
+         ? (uint32_t)strtoul(tmp, NULL, 10)                                    \
+         : (uint32_t)(fallback_))
 
     sys_config_t cfg;
     memset(&cfg, 0, sizeof(sys_config_t));
+    sys_nvs_load_config(&cfg);
 
-    /* Use safe accessors — no raw pointer dereference on potentially-NULL items. */
-    strncpy(cfg.wifi_ssid,           safe_str(cJSON_GetObjectItem(root, "ssid")),         SYS_WIFI_SSID_MAX_LEN   - 1);
-    strncpy(cfg.wifi_pass,           safe_str(cJSON_GetObjectItem(root, "pass")),         SYS_WIFI_PASS_MAX_LEN   - 1);
-    strncpy(cfg.tg_token,            safe_str(cJSON_GetObjectItem(root, "tg_tok")),       SYS_TG_TOKEN_MAX_LEN    - 1);
-    strncpy(cfg.tg_chat_id,          safe_str(cJSON_GetObjectItem(root, "tg_chat")),      SYS_TG_CHAT_MAX_LEN     - 1);
-    strncpy(cfg.discord_webhook_url, safe_str(cJSON_GetObjectItem(root, "disc_url")),     SYS_WEBHOOK_URL_MAX_LEN - 1);
-    strncpy(cfg.custom_webhook_url,  safe_str(cJSON_GetObjectItem(root, "cust_url")),     SYS_WEBHOOK_URL_MAX_LEN - 1);
-    strncpy(cfg.mqtt_broker_uri,     safe_str(cJSON_GetObjectItem(root, "mqtt_uri")),     SYS_MQTT_URI_MAX_LEN    - 1);
-    strncpy(cfg.mqtt_username,       safe_str(cJSON_GetObjectItem(root, "mqtt_user")),    SYS_MQTT_USER_MAX_LEN   - 1);
-    strncpy(cfg.mqtt_password,       safe_str(cJSON_GetObjectItem(root, "mqtt_pass")),    SYS_MQTT_PASS_MAX_LEN   - 1);
-    strncpy(cfg.mqtt_topic_prefix,   safe_str(cJSON_GetObjectItem(root, "mqtt_prefix")),  SYS_MQTT_PREFIX_MAX_LEN - 1);
-    cfg.v_dry_mv                 = (int16_t) safe_int(cJSON_GetObjectItem(root, "v_dry"),        0);
-    cfg.v_wet_mv                 = (int16_t) safe_int(cJSON_GetObjectItem(root, "v_wet"),        0);
-    cfg.soil_alert_threshold_pct = (uint8_t) safe_int(cJSON_GetObjectItem(root, "soil_th_pct"),  30);
-    cfg.mqtt_port                = (uint16_t)safe_int(cJSON_GetObjectItem(root, "mqtt_port"),   1883);
+    GET_STR_IF_NOT_EMPTY("ssid", cfg.wifi_ssid,           SYS_WIFI_SSID_MAX_LEN);
+    GET_STR_IF_NOT_EMPTY("pass", cfg.wifi_pass,           SYS_WIFI_PASS_MAX_LEN);
+    GET_STR("tg_tok",      cfg.tg_token,            SYS_TG_TOKEN_MAX_LEN);
+    GET_STR("tg_chat",     cfg.tg_chat_id,          SYS_TG_CHAT_MAX_LEN);
+    GET_STR("disc_url",    cfg.discord_webhook_url, SYS_WEBHOOK_URL_MAX_LEN);
+    GET_STR("cust_url",    cfg.custom_webhook_url,  SYS_WEBHOOK_URL_MAX_LEN);
+    GET_STR("mqtt_uri",    cfg.mqtt_broker_uri,     SYS_MQTT_URI_MAX_LEN);
+    GET_STR("mqtt_user",   cfg.mqtt_username,       SYS_MQTT_USER_MAX_LEN);
+    GET_STR("mqtt_pass",   cfg.mqtt_password,       SYS_MQTT_PASS_MAX_LEN);
+    GET_STR("mqtt_prefix", cfg.mqtt_topic_prefix,   SYS_MQTT_PREFIX_MAX_LEN);
+
+    cfg.soil_alert_threshold_pct = (uint8_t) GET_INT("soil_th_pct", 30);
+    cfg.mqtt_port                = (uint16_t)GET_INT("mqtt_port",   1883);
+    cfg.active_sensors           =            GET_U32("sensors",        0);
+
+    /* ADC calibration — safe defaults if the user left them blank. */
+    int v_dry_val = GET_INT("v_dry", 0);
+    int v_wet_val = GET_INT("v_wet", 0);
+    cfg.v_dry_mv = (int16_t)(v_dry_val > 0 ? v_dry_val : 3000);
+    cfg.v_wet_mv = (int16_t)(v_wet_val > 0 ? v_wet_val : 1500);
+
+#undef GET_STR
+#undef GET_STR_IF_NOT_EMPTY
+#undef GET_INT
+#undef GET_U32
+
     cfg.is_configured = true;
-
-    /* Require at minimum a non-empty SSID; reject the save if it is blank. */
-    if (cfg.wifi_ssid[0] == '\0') {
-        cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID cannot be empty");
-        ESP_LOGE(TAG, "Save rejected: SSID field is empty.");
-        return ESP_FAIL;
-    }
-
     sys_nvs_save_config(&cfg);
-    cJSON_Delete(root);
 
-    httpd_resp_sendstr(req, "OK");
+    ESP_LOGW(TAG, "[SAVE] Config saved. active_sensors=0x%08lX v_dry=%d v_wet=%d. Rebooting...",
+             (unsigned long)cfg.active_sensors, cfg.v_dry_mv, cfg.v_wet_mv);
 
-    ESP_LOGW(TAG, "Configuration saved. Rebooting in 2 seconds...");
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    /* Send the response BEFORE rebooting so the browser gets the HTTP 200
+     * and can display a "Saved — rebooting" page rather than a connection
+     * error.  httpd_resp_sendstr() flushes the socket synchronously.
+     * The 500 ms delay gives the TCP stack time to drain its outbound queue
+     * before esp_restart() destroys every driver. */
+    httpd_resp_set_hdr(req, "Content-Type", "text/html");
+    httpd_resp_sendstr(req,
+        "<!DOCTYPE html><html><head>"
+        "<meta charset='utf-8'>"
+        "<meta http-equiv='refresh' content='6;url=http://192.168.4.1'>"
+        "<style>body{font-family:sans-serif;display:flex;justify-content:center;"
+        "align-items:center;height:100vh;margin:0;background:#f5f5f5;}"
+        ".box{text-align:center;padding:40px;background:#fff;border-radius:16px;"
+        "box-shadow:0 8px 30px rgba(0,0,0,0.08);}"
+        "h2{color:#FF6600;}p{color:#666;}"
+        "</style></head><body>"
+        "<div class='box'><h2>&#10003; Configuration Saved!</h2>"
+        "<p>The device is rebooting&hellip;<br>"
+        "<small>You will be redirected back to the portal in 6 seconds.</small></p>"
+        "</div></body></html>");
+
+    vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
 
     return ESP_OK;

@@ -133,7 +133,14 @@ bool sys_nvs_load_config(sys_config_t *out_cfg) {
     }
     out_cfg->is_configured = (conf == 1);
 
-    ESP_LOGI(TAG, "Configuration loaded. is_configured = %d", out_cfg->is_configured);
+    /* Load the active-sensor bitmask; default 0 (no sensors) on first boot.
+     * The user must visit the portal to opt sensors in after a firmware upgrade. */
+    if (nvs_get_u32(handle, "sensors", &out_cfg->active_sensors) != ESP_OK) {
+        out_cfg->active_sensors = 0;
+    }
+
+    ESP_LOGI(TAG, "Configuration loaded. is_configured = %d, active_sensors = 0x%08lX",
+             out_cfg->is_configured, (unsigned long)out_cfg->active_sensors);
 
     nvs_close(handle);
     return true;
@@ -185,6 +192,7 @@ bool sys_nvs_save_config(const sys_config_t *cfg) {
     NVS_SET(nvs_set_i16, "v_wet",       cfg->v_wet_mv)
     NVS_SET(nvs_set_u8,  "soil_th_pct", cfg->soil_alert_threshold_pct)
     NVS_SET(nvs_set_u8,  "conf",        cfg->is_configured ? 1 : 0)
+    NVS_SET(nvs_set_u32, "sensors",     cfg->active_sensors)
 
 #undef NVS_SET
 

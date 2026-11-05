@@ -47,10 +47,9 @@
 #include "sys_nvs.h"
 #include "sys_wifi.h"
 #include "sys_mqtt.h"
-#include "hal_moisture.h"
-#include "hal_bmp280.h"
-#include "hal_dht22.h"
-#include "hal_i2c.h"
+#include "sensor_registry.h"
+#include "sys_cli.h"
+#include "cJSON.h"
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Configuration
@@ -230,6 +229,20 @@ void app_main(void) {
         cfg.is_configured = false;
     }
 
+#if CLI_ENABLED
+    /* ── Step 3b: Optional wired service console ─────────────────────────── */
+    /* Offered only on cold boot / RESET so timer wake-ups stay as short as
+     * possible.  The console edits its own copy of the config, so reload
+     * whatever the user saved before continuing. */
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER &&
+        sys_cli_wait_for_key(CLI_ENTRY_WINDOW_MS)) {
+        sys_cli_run();
+        if (!sys_nvs_load_config(&cfg)) {
+            cfg.is_configured = false;
+        }
+    }
+#endif
+
     ESP_LOGI(TAG, "Device is_configured = %s",
              cfg.is_configured ? "TRUE" : "FALSE");
 
@@ -253,16 +266,14 @@ void app_main(void) {
     } else {
         /* ── Path B: Device is configured — normal operation ─────────────── */
         ESP_LOGI(TAG, "Device is configured. Starting normal operation.");
-        ESP_LOGI(TAG, "  SSID       : %s", cfg.wifi_ssid);
-        ESP_LOGI(TAG, "  TG Token   : %s", cfg.tg_token[0]            ? "[SET]" : "[not configured]");
-        ESP_LOGI(TAG, "  TG Chat    : %s", cfg.tg_chat_id[0]          ? "[SET]" : "[not configured]");
-        ESP_LOGI(TAG, "  Discord WH : %s", cfg.discord_webhook_url[0]  ? "[SET]" : "[not configured]");
-        ESP_LOGI(TAG, "  Custom WH  : %s", cfg.custom_webhook_url[0]   ? "[SET]" : "[not configured]");
-        ESP_LOGI(TAG, "  MQTT Broker: %s", cfg.mqtt_broker_uri[0]      ? cfg.mqtt_broker_uri : "[not configured]");
-        ESP_LOGI(TAG, "  MQTT Prefix: %s", cfg.mqtt_topic_prefix[0]    ? cfg.mqtt_topic_prefix : "(default)");
-        ESP_LOGI(TAG, "  Threshold  : %d%%", (int)cfg.soil_alert_threshold_pct);
-        ESP_LOGI(TAG, "  V_dry      : %d mV", cfg.v_dry_mv);
-        ESP_LOGI(TAG, "  V_wet      : %d mV", cfg.v_wet_mv);
+        ESP_LOGI(TAG, "  SSID         : %s", cfg.wifi_ssid);
+        ESP_LOGI(TAG, "  TG Token     : %s", cfg.tg_token[0]           ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  TG Chat      : %s", cfg.tg_chat_id[0]         ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  Discord WH   : %s", cfg.discord_webhook_url[0]  ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  Custom WH    : %s", cfg.custom_webhook_url[0]   ? "[SET]" : "[not configured]");
+        ESP_LOGI(TAG, "  MQTT Broker  : %s", cfg.mqtt_broker_uri[0]      ? cfg.mqtt_broker_uri : "[not configured]");
+        ESP_LOGI(TAG, "  MQTT Prefix  : %s", cfg.mqtt_topic_prefix[0]    ? cfg.mqtt_topic_prefix : "(default)");
+        ESP_LOGI(TAG, "  Active Sensors: 0x%08lX", (unsigned long)cfg.active_sensors);
 
         /* ── Step 5: Spawn the button monitor task ────────────────────────── */
         /* The task runs in the background at low priority, polling GPIO9.
@@ -285,123 +296,101 @@ void app_main(void) {
                      BUTTON_CONFIG_PIN, BUTTON_HOLD_MS);
         }
 
-        /* ── Step 6: Read sensors ─────────────────────────────────────────── */
-        /* Sensors self-initialise on first call (HAL layer manages handles). */
-        ESP_LOGI(TAG, "Reading sensors...");
+        /* ── Step 6: Initialise all active sensors ───────────────────────── */
+        /* Provide the loaded config to the registry so the moisture adapter
+         * can access ADC calibration bounds (v_dry_mv, v_wet_mv). */
+        sensor_registry_set_config(&cfg);
 
-        int32_t    soil_mv = hal_moisture_read_mv();
-        bmp280_data_t bmp  = {0};
-        hal_bmp280_read(&bmp);
-        dht22_data_t  dht  = {0};
-        hal_dht22_read(&dht);
+        ESP_LOGI(TAG, "[REGISTRY] %u sensor(s) registered. Active mask: 0x%08lX",
+                 (unsigned)g_sensor_registry_count,
+                 (unsigned long)cfg.active_sensors);
 
-        /* Calculate soil moisture % from user-calibrated ADC bounds.
-         * Mirrors the JavaScript calcPct() logic in the web portal.
-         * moisture_pct == -1 means calibration is not yet set. */
-        int moisture_pct = -1;
-        if (cfg.v_dry_mv > cfg.v_wet_mv && soil_mv >= 0) {
-            if      (soil_mv >= cfg.v_dry_mv) { moisture_pct = 0;   }
-            else if (soil_mv <= cfg.v_wet_mv) { moisture_pct = 100; }
-            else {
-                moisture_pct = (int32_t)(
-                    ((int32_t)cfg.v_dry_mv - soil_mv) * 100L /
-                    ((int32_t)cfg.v_dry_mv - (int32_t)cfg.v_wet_mv)
-                );
+        if (cfg.active_sensors == 0) {
+            ESP_LOGW(TAG, "[REGISTRY] No sensors selected. Open the portal to enable sensors.");
+        }
+
+        for (size_t i = 0; i < g_sensor_registry_count; i++) {
+            if (cfg.active_sensors & g_sensor_registry[i].sensor_bit) {
+                ESP_LOGI(TAG, "[REGISTRY] Initialising: %s", g_sensor_registry[i].name);
+                esp_err_t init_err = g_sensor_registry[i].init();
+                if (init_err != ESP_OK) {
+                    /* Disable this sensor for the remainder of this wake cycle
+                     * so read_data and deinit are not called on a broken device. */
+                    ESP_LOGW(TAG, "[REGISTRY] %s init failed (%s) — disabling for this cycle.",
+                             g_sensor_registry[i].name, esp_err_to_name(init_err));
+                    cfg.active_sensors &= ~g_sensor_registry[i].sensor_bit;
+                }
             }
         }
 
-        ESP_LOGI(TAG, "Sensors: soil=%ld mV (%d%%) | "
-                      "BMP280: %.1f C / %.1f hPa | DHT22: %.1f C / %.1f%%",
-                 (long)soil_mv, moisture_pct,
-                 bmp.temperature, bmp.pressure,
-                 dht.temperature, dht.humidity);
+        /* ── Step 7: Build dynamic JSON payload ──────────────────────────── */
+        cJSON *payload = cJSON_CreateObject();
+        if (!payload) {
+            ESP_LOGE(TAG, "cJSON_CreateObject() failed — out of heap?");
+        } else {
+            for (size_t i = 0; i < g_sensor_registry_count; i++) {
+                if (cfg.active_sensors & g_sensor_registry[i].sensor_bit) {
+                    ESP_LOGI(TAG, "[REGISTRY] Reading: %s", g_sensor_registry[i].name);
+                    esp_err_t read_err = g_sensor_registry[i].read_data(payload);
+                    if (read_err != ESP_OK) {
+                        ESP_LOGW(TAG, "[REGISTRY] %s read_data failed: %s",
+                                 g_sensor_registry[i].name, esp_err_to_name(read_err));
+                    }
+                }
+            }
+        }
 
         ESP_LOGI(TAG, "[HEAP] After sensor reads — Free: %"PRIu32" B",
                  esp_get_free_heap_size());
 
-        /* ── Step 7: Connect WiFi, publish MQTT, dispatch threshold alerts ── */
+        /* ── Step 8: Connect WiFi, publish MQTT payload ───────────────────── */
         if (sys_wifi_connect_sta(cfg.wifi_ssid, cfg.wifi_pass)) {
 
-            /* Step 7a: MQTT telemetry — runs every cycle regardless of threshold.
-             * Publishes HA Auto-Discovery configs + sensor state topics.
-             * No-op if cfg.mqtt_broker_uri is empty. */
-            sys_mqtt_publish(&cfg, soil_mv, moisture_pct, &bmp, &dht);
+            if (payload) {
+                /* Serialise the cJSON payload to a flat string and publish.
+                 * cJSON_PrintUnformatted() heap-allocates the string; we must
+                 * free() it ourselves after sys_mqtt_publish_raw() returns. */
+                char *json_str = cJSON_PrintUnformatted(payload);
+                if (json_str) {
+                    ESP_LOGI(TAG, "[REGISTRY] Payload: %s", json_str);
+                    sys_mqtt_publish_raw(&cfg, json_str);
+                    free(json_str);
+                } else {
+                    ESP_LOGE(TAG, "cJSON_PrintUnformatted() returned NULL — out of heap?");
+                }
+            }
 
             ESP_LOGI(TAG, "[HEAP] After MQTT cycle — Free: %"PRIu32" B",
                      esp_get_free_heap_size());
 
-            /* Step 7b: Threshold-based webhook alerts — independent of MQTT. */
-            if (moisture_pct < 0) {
-                /* Calibration not configured — log a hint, send anyway so the
-                 * user knows the node is alive, but skip threshold evaluation. */
-                ESP_LOGW(TAG, "Moisture %% uncalibrated (v_dry=%d mV, v_wet=%d mV). "
-                              "Set calibration in the portal to enable threshold alerts.",
-                         cfg.v_dry_mv, cfg.v_wet_mv);
-
-            } else if (moisture_pct < (int)cfg.soil_alert_threshold_pct) {
-
-                ESP_LOGW(TAG, "ALERT: Soil moisture %d%% is BELOW threshold %d%%!",
-                         moisture_pct, (int)cfg.soil_alert_threshold_pct);
-
-                /* Build a human-readable alert message.  cJSON will re-escape
-                 * it properly when building the webhook payloads. */
-                char alert_msg[256];
-                snprintf(alert_msg, sizeof(alert_msg),
-                         "Low soil moisture alert!\n"
-                         "Moisture: %d%% (threshold: %d%%)\n"
-                         "Raw ADC : %ld mV\n"
-                         "DHT22   : %.1f C / %.1f%% RH\n"
-                         "BMP280  : %.1f C / %.1f hPa",
-                         moisture_pct, (int)cfg.soil_alert_threshold_pct,
-                         (long)soil_mv,
-                         dht.temperature, dht.humidity,
-                         bmp.temperature, bmp.pressure);
-
-                sys_alerts_send(&cfg, alert_msg, soil_mv,
-                                dht.temperature, dht.humidity);
-
-            } else {
-                ESP_LOGI(TAG, "Soil moisture OK (%d%% >= threshold %d%%). No alert sent.",
-                         moisture_pct, (int)cfg.soil_alert_threshold_pct);
-            }
-
         } else {
-            ESP_LOGE(TAG, "WiFi connection failed. Skipping notifications this cycle.");
+            ESP_LOGE(TAG, "WiFi connection failed. Skipping MQTT this cycle.");
         }
 
-        /* ── Step 8: Enter deep sleep ──────────────────────────────────────── */
+        /* Always delete the payload object, even on WiFi failure, to prevent
+         * heap leaks.  cJSON_Delete(NULL) is a documented no-op, so this is
+         * safe even if cJSON_CreateObject() returned NULL above. */
+        cJSON_Delete(payload);
+
+        /* ── Step 9: Deinit all active sensors before deep sleep ─────────── */
         /* Give the TCP/IP stack a brief moment to flush before powering down. */
         vTaskDelay(pdMS_TO_TICKS(200));
         ESP_LOGI(TAG, "[HEAP] Pre-sleep — Free: %"PRIu32" B | Min-ever: %"PRIu32" B",
                  esp_get_free_heap_size(),
                  esp_get_minimum_free_heap_size());
 
-        /* De-initialise all peripherals before sleeping.
-         *
-         * Without this, the I2C driver leaves SCL and SDA configured as
-         * open-drain outputs.  When the peripheral clock is gated during deep
-         * sleep the pins float, causing leakage current through any external
-         * pull-up resistors and defeating the sub-mA sleep target.
-         *
-         * hal_i2c_deinit() calls i2c_driver_delete() then gpio_reset_pin()
-         * on both SDA and SCL, returning them to Hi-Z with no driver. */
-        hal_i2c_deinit();
-
-        /* Ensure the moisture-sensor power gate is off and its GPIO is Hi-Z.
-         * pwr_gate_disable() is already called at the end of hal_moisture_read_mv(),
-         * but an explicit reset here is the final safety net before sleep. */
-        gpio_set_level(SENSOR_POWER_PIN, 0);
-        gpio_reset_pin(SENSOR_POWER_PIN);
-
-        /* Return the DHT22 data pin to Hi-Z so the sensor's internal pull-up
-         * (if any) controls the line cleanly during sleep. */
-        gpio_reset_pin(DHT22_DATA_PIN);
+        for (size_t i = 0; i < g_sensor_registry_count; i++) {
+            if (cfg.active_sensors & g_sensor_registry[i].sensor_bit) {
+                ESP_LOGD(TAG, "[REGISTRY] Deinitialising: %s", g_sensor_registry[i].name);
+                g_sensor_registry[i].deinit();
+            }
+        }
 
         ESP_LOGI(TAG, "Entering deep sleep for %d seconds.", DEFAULT_SLEEP_SEC);
         esp_sleep_enable_timer_wakeup((uint64_t)DEFAULT_SLEEP_SEC * 1000000ULL);
         esp_deep_sleep_start();
 
-        /* ── Unreachable — esp_deep_sleep_start() does not return. ──────────── */
+        /* ── Unreachable — esp_deep_sleep_start() does not return. ────────── */
         ESP_LOGE(TAG, "esp_deep_sleep_start() returned unexpectedly!");
         while (1) { vTaskDelay(pdMS_TO_TICKS(5000)); }
     }
