@@ -73,7 +73,7 @@ GPIO assignments are defined in [`include/config.h`](include/config.h) and selec
 ### Build
 
 ```bash
-git clone https://github.com/your-username/ESP32_EnvironmentalNode.git
+git clone https://github.com/d7main/ESP32_EnvironmentalNode.git
 cd ESP32_EnvironmentalNode
 pio run --environment esp32_c3
 ```
