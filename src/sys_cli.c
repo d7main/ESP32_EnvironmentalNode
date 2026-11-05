@@ -51,7 +51,6 @@
 #include "config.h"
 #include "sys_cli.h"
 #include "sys_nvs.h"
-#include "sys_wifi.h"
 #include "sensor_registry.h"
 #include "hal_i2c.h"
 
@@ -320,7 +319,7 @@ static void print_banner(void)
         "   ///          /// //   ///   ///     //",
         "  ////////     ///  //  ///    ///   //",
         " ///          ///   // ///     /// //",
-        "///////////  ///    /////      ///",
+        "/////////    ///    /////      ///",
     };
     static const char *const grad[] = {
         "\x1b[1;38;5;51m", "\x1b[1;38;5;45m", "\x1b[1;38;5;39m",
@@ -364,7 +363,6 @@ static void print_banner(void)
 
     printf("  " A_CYAN "help" A_RST "      list all commands\n");
     printf("  " A_CYAN "config" A_RST "    view and edit settings\n");
-    printf("  " A_CYAN "wifi" A_RST "      start Wi-Fi portal manually\n");
     printf("  " A_CYAN "exit" A_RST "      leave console and continue boot\n\n");
 }
 
@@ -742,32 +740,6 @@ static const cli_sub_t s_i2c_subs[] = {
     { "scan", "", "Probe addresses 0x08..0x77 and list responders", NULL, i2c_scan },
 };
 
-static int wifi_portal(int argc, char **argv)
-{
-    const bool force = (argc >= 2 && strcmp(argv[1], "-f") == 0);
-    if (s_dirty && !force) {
-        printf("You have unsaved changes. Run 'config save', or 'wifi portal -f' to discard them.\n");
-        return CLI_OK;
-    }
-    printf("Starting Wi-Fi access point + configuration portal...\n");
-    printf("  SSID     : %s\n", AP_WIFI_SSID);
-    printf("  Password : %s\n", AP_WIFI_PASS);
-    printf("  Open     : http://192.168.4.1/\n");
-    printf("The portal runs until you save settings (the chip then reboots) or press RESET.\n");
-    fflush(stdout);
-
-    /* Blocks for good, exactly like the button-triggered portal in main.c. */
-    sys_wifi_start_ap_and_server();
-    return CLI_OK;
-}
-
-static const cli_sub_t s_wifi_subs[] = {
-    { "portal", "[-f]", "Turn on Wi-Fi AP + web config portal manually",
-      "Starts the same access point and web page as the 3-second BOOT-button hold.\n"
-      "Blocks until settings are saved in the browser (chip reboots) or you reset it.\n"
-      "-f discards unsaved console changes.", wifi_portal },
-};
-
 /* ══════════════════════════════════════════════════════════════════════════
  * Commands: reboot, exit
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -828,8 +800,6 @@ static const cli_cmd_t s_commands[] = {
       SUBS(s_sensor_subs), NULL, print_sensor_names },
     { "i2c",    NULL,                 "I2C bus diagnostics",
       SUBS(s_i2c_subs), NULL, NULL },
-    { "wifi",   NULL,                 "Manually turn on Wi-Fi (config portal)",
-      SUBS(s_wifi_subs), NULL, NULL },
     { "banner", "",                   "Show the ESP32 EnvironmentalNode logo and status",
       NULL, 0, cmd_banner, NULL },
     { "reboot", "",                   "Restart the chip",
