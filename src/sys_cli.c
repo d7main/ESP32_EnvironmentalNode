@@ -51,6 +51,7 @@
 #include "config.h"
 #include "sys_cli.h"
 #include "sys_nvs.h"
+#include "sys_wifi.h"
 #include "sensor_registry.h"
 #include "hal_i2c.h"
 
@@ -293,100 +294,78 @@ static bool is_help_flag(const char *s)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * Banner / colours
+ * Banner (plain ASCII - renders identically on every serial terminal)
  * ══════════════════════════════════════════════════════════════════════════ */
 
-static bool s_color = true;   /* toggled by the 'color' command */
+#define A_RST  "\x1b[0m"
+#define A_DIM  "\x1b[2m"
+#define A_BOLD "\x1b[1m"
+#define A_CYAN "\x1b[36m"
+#define A_GRN  "\x1b[32m"
+#define A_YEL  "\x1b[33m"
+#define A_ORNG "\x1b[1;38;5;208m"
 
-#define C_RESET  (s_color ? "\x1b[0m"    : "")
-#define C_CYAN   (s_color ? "\x1b[1;36m" : "")
-#define C_BLUE   (s_color ? "\x1b[1;34m" : "")
-#define C_MAG    (s_color ? "\x1b[1;35m" : "")
-#define C_DIM    (s_color ? "\x1b[2m"    : "")
-#define C_GREEN  (s_color ? "\x1b[1;32m" : "")
-#define C_YELLOW (s_color ? "\x1b[1;33m" : "")
+#define BANNER_RULE A_DIM "  ------------------------------------------------------------" A_RST "\n"
 
-
-#define BOX_INNER 52   /* visible columns between the frame borders */
-
-static void box_edge(const char *l, const char *r)
+static void banner_kv(const char *key, const char *vcol, const char *value)
 {
-    printf("  %s%s", C_DIM, l);
-    for (int i = 0; i < BOX_INNER + 2; i++) printf("\xe2\x94\x80");   /* ─ */
-    printf("%s%s\n", r, C_RESET);
-}
-
-/* One framed row: dim label, coloured value, optional pre-coloured extra
- * (extra_w = its visible width).  Padding uses visible widths, so ANSI codes
- * never break the right border. */
-static void box_row(const char *label, const char *value, const char *vcol,
-                    const char *extra, int extra_w)
-{
-    int pad = BOX_INNER - (int)strlen(label) - (int)strlen(value) - extra_w;
-    if (pad < 0) pad = 0;
-    printf("  %s\xe2\x94\x82%s %s%s%s%s%s%s%s%*s %s\xe2\x94\x82%s\n",
-           C_DIM, C_RESET, C_DIM, label, C_RESET, vcol, value, C_RESET,
-           extra ? extra : "", pad, "", C_DIM, C_RESET);
+    printf("  " A_DIM "%-10s" A_RST "%s%s" A_RST "\n", key, vcol, value);
 }
 
 static void print_banner(void)
 {
-    /* Logo by d7main, coloured per row (cyan -> blue -> magenta). */
+    /* Logo by d7main, cyan -> blue gradient */
     static const char *const logo[] = {
         "    /////////    ////     ///  ///       //",
         "   ///          /// //   ///   ///     //",
         "  ////////     ///  //  ///    ///   //",
         " ///          ///   // ///     /// //",
         "///////////  ///    /////      ///",
-        "___________________________________________",
     };
     static const char *const grad[] = {
-        "\x1b[38;5;51m", "\x1b[38;5;45m", "\x1b[38;5;39m",
-        "\x1b[38;5;75m", "\x1b[38;5;135m", "\x1b[2m",
+        "\x1b[1;38;5;51m", "\x1b[1;38;5;45m", "\x1b[1;38;5;39m",
+        "\x1b[1;38;5;33m", "\x1b[1;38;5;27m",
     };
 
     int active = 0;
-    char bar[200] = "";
-    size_t bar_len = 0;
-    int bar_w = 0;
-    for (size_t i = 0; i < g_sensor_registry_count && i < 16; i++) {
+    char bar[96] = "";
+    size_t n = 0;
+    for (size_t i = 0; i < g_sensor_registry_count && n + 24 < sizeof(bar); i++) {
         const bool on = (s_cfg.active_sensors & g_sensor_registry[i].sensor_bit) != 0;
         if (on) active++;
-        bar_len += snprintf(bar + bar_len, sizeof(bar) - bar_len, "%s%s%s ",
-                            on ? C_GREEN : C_DIM,
-                            on ? "\xe2\x97\x8f" : "\xe2\x97\x8b",   /* ● / ○ */
-                            C_RESET);
-        bar_w += 2;
+        n += snprintf(bar + n, sizeof(bar) - n, "%s%c" A_RST, on ? A_GRN : A_DIM, on ? '#' : '-');
     }
-    char sens[24];
-    snprintf(sens, sizeof(sens), "%d/%u on  ", active, (unsigned)g_sensor_registry_count);
 
-    char state[40];
+    char sens[160];
+    snprintf(sens, sizeof(sens), "%d/%u active  " A_DIM "[" A_RST "%s" A_DIM "]" A_RST,
+             active, (unsigned)g_sensor_registry_count, bar);
+
+    char state[48];
     snprintf(state, sizeof(state), "%s%s",
              s_cfg.is_configured ? "configured" : "NOT configured",
-             s_dirty ? "  (unsaved changes)" : "");
+             s_dirty ? " (unsaved changes)" : "");
 
     printf("\n");
     for (size_t i = 0; i < sizeof(logo) / sizeof(logo[0]); i++) {
-        printf("  %s%s%s\n", s_color ? grad[i] : "", logo[i], C_RESET);
+        printf("  %s%s" A_RST "\n", grad[i], logo[i]);
     }
-    printf("\n  %s\xe2\x96\xb8%s %sE N V I R O N M E N T A L   N O D E%s  %s\xe2\x97\x82%s\n\n",
-           C_MAG, C_RESET, C_CYAN, C_RESET, C_MAG, C_RESET);
+    printf("\n  " A_BOLD "ESP32 Environmental Node" A_RST "  " A_CYAN "v" FW_VERSION A_RST
+           "   " A_DIM "by" A_RST " d" A_ORNG "7" A_RST "main\n");
+    printf("  " A_DIM "Low-power multi-sensor firmware with a built-in service console" A_RST "\n\n");
 
-    box_edge("\xe2\x95\xad", "\xe2\x95\xae");                                   /* ╭ ╮ */
-    box_row("author   ", "d7main", C_GREEN, NULL, 0);
-    box_row("source   ", "github.com/d7main/ESP32_EnvironmentalNode", C_CYAN, NULL, 0);
-    box_edge("\xe2\x94\x9c", "\xe2\x94\xa4");                                   /* ├ ┤ */
-    box_row("chip     ", CHIP_NAME, C_CYAN, NULL, 0);
-    box_row("firmware ", "v" FW_VERSION, C_CYAN, NULL, 0);
-    box_row("state    ", state, s_cfg.is_configured ? C_GREEN : C_YELLOW, NULL, 0);
-    box_row("sensors  ", sens, C_CYAN, bar, bar_w);
-    box_edge("\xe2\x95\xb0", "\xe2\x95\xaf");                                   /* ╰ ╯ */
+    printf(BANNER_RULE);
+    banner_kv("author",   A_BOLD, "d7main");
+    banner_kv("source",   A_CYAN, "github.com/d7main/ESP32_EnvironmentalNode");
+    banner_kv("chip",     A_CYAN, CHIP_NAME);
+    banner_kv("firmware", A_CYAN, "v" FW_VERSION);
+    banner_kv("state",    s_cfg.is_configured ? A_GRN : A_YEL, state);
+    banner_kv("sensors",  "", sens);
+    printf(BANNER_RULE);
 
-    printf("  %s\xe2\x96\xb8%s %shelp%s commands   %s\xe2\x96\xb8%s %sconfig%s settings   "
-           "%s\xe2\x96\xb8%s %sexit%s continue\n\n",
-           C_MAG, C_RESET, C_CYAN, C_RESET, C_MAG, C_RESET, C_CYAN, C_RESET,
-           C_MAG, C_RESET, C_CYAN, C_RESET);
+    printf("  " A_CYAN "help" A_RST "      list all commands\n");
+    printf("  " A_CYAN "config" A_RST "    view and edit settings\n");
+    printf("  " A_CYAN "wifi" A_RST "      start Wi-Fi portal manually\n");
+    printf("  " A_CYAN "exit" A_RST "      leave console and continue boot\n\n");
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -763,6 +742,32 @@ static const cli_sub_t s_i2c_subs[] = {
     { "scan", "", "Probe addresses 0x08..0x77 and list responders", NULL, i2c_scan },
 };
 
+static int wifi_portal(int argc, char **argv)
+{
+    const bool force = (argc >= 2 && strcmp(argv[1], "-f") == 0);
+    if (s_dirty && !force) {
+        printf("You have unsaved changes. Run 'config save', or 'wifi portal -f' to discard them.\n");
+        return CLI_OK;
+    }
+    printf("Starting Wi-Fi access point + configuration portal...\n");
+    printf("  SSID     : %s\n", AP_WIFI_SSID);
+    printf("  Password : %s\n", AP_WIFI_PASS);
+    printf("  Open     : http://192.168.4.1/\n");
+    printf("The portal runs until you save settings (the chip then reboots) or press RESET.\n");
+    fflush(stdout);
+
+    /* Blocks for good, exactly like the button-triggered portal in main.c. */
+    sys_wifi_start_ap_and_server();
+    return CLI_OK;
+}
+
+static const cli_sub_t s_wifi_subs[] = {
+    { "portal", "[-f]", "Turn on Wi-Fi AP + web config portal manually",
+      "Starts the same access point and web page as the 3-second BOOT-button hold.\n"
+      "Blocks until settings are saved in the browser (chip reboots) or you reset it.\n"
+      "-f discards unsaved console changes.", wifi_portal },
+};
+
 /* ══════════════════════════════════════════════════════════════════════════
  * Commands: reboot, exit
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -784,17 +789,6 @@ static int cmd_banner(int argc, char **argv)
 {
     (void)argc; (void)argv;
     print_banner();
-    return CLI_OK;
-}
-
-static int cmd_color(int argc, char **argv)
-{
-    if (argc != 2 || (strcmp(argv[1], "on") != 0 && strcmp(argv[1], "off") != 0)) {
-        printf("Color is %s.\n", s_color ? "on" : "off");
-        return CLI_EUSAGE;
-    }
-    s_color = (strcmp(argv[1], "on") == 0);
-    printf("Color %s.\n", s_color ? "on" : "off");
     return CLI_OK;
 }
 
@@ -834,10 +828,10 @@ static const cli_cmd_t s_commands[] = {
       SUBS(s_sensor_subs), NULL, print_sensor_names },
     { "i2c",    NULL,                 "I2C bus diagnostics",
       SUBS(s_i2c_subs), NULL, NULL },
+    { "wifi",   NULL,                 "Manually turn on Wi-Fi (config portal)",
+      SUBS(s_wifi_subs), NULL, NULL },
     { "banner", "",                   "Show the ESP32 EnvironmentalNode logo and status",
       NULL, 0, cmd_banner, NULL },
-    { "color",  "<on|off>",           "Toggle ANSI colors (turn off if you see garbage)",
-      NULL, 0, cmd_color, NULL },
     { "reboot", "",                   "Restart the chip",
       NULL, 0, cmd_reboot, NULL },
     { "exit",   "[-f]",               "Leave console, continue normal cycle (-f drops unsaved)",

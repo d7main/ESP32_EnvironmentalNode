@@ -54,6 +54,7 @@ nav:
   - Home: index.md
   - Web Flasher: flasher.md
   - Configuration: configuration.md
+  - Service Console (CLI): cli.md
   - Hardware: hardware.md
 
 # ── Markdown Extensions ───────────────────────────────────────────────────────
