@@ -118,6 +118,11 @@ All configuration is stored in the `config` NVS namespace. Keys are limited to 1
 
 ---
 
+## Authors
+
+- **Demian Zaiats (d7main)** — [demianzaiats@gmail.com](mailto:demianzaiats@gmail.com)
+- **Artur Vlasenko**
+
 ## License
 
 [MIT](https://github.com/d7main/ESP32_EnvironmentalNode/blob/main/LICENSE) — free to use, modify, and distribute.

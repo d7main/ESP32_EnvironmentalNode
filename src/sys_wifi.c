@@ -3,7 +3,7 @@
  * Wifi, HTTP Server and Telegram API implementation
  * @file sys_wifi.c
  * @brief Network implementation (Wi-Fi STA/AP, HTTPD, Telegram API)
- * @author d7main
+ * @author d7main, Artur Vlasenko
  * contact info: demianzaiats@gmail.com
  * @license MIT
  */
@@ -363,6 +363,7 @@ static const char *html_page =
 "<div class='footer'>"
 "&copy; 2026 ESP32_EnvironmentalNode<br>"
 "by <b style='color:#000;'>d<span style='color:var(--primary);'>7</span>main</b> (Demian Zaiats)<br>"
+"and <b style='color:#000;'>Artur Vlasenko</b><br>"
 "Contact: <a href='mailto:demianzaiats@gmail.com'>demianzaiats@gmail.com</a>"
 "</div>"
 "</div></body></html>";

@@ -227,4 +227,7 @@ ESP32_EnvironmentalNode/
 
 MIT — see [`LICENSE`](LICENSE) for details.
 
-Author: **d7main** (Demian Zaiats) — demianzaiats@gmail.com
+Authors:
+
+- **d7main** (Demian Zaiats) — demianzaiats@gmail.com
+- **Artur Vlasenko**
